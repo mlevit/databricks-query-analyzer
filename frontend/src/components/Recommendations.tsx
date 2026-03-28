@@ -1,10 +1,10 @@
-import type { Recommendation } from "../types";
+import type { Recommendation, Severity } from "../types";
 
 interface Props {
   recommendations: Recommendation[];
 }
 
-const SEVERITY_ICONS: Record<string, string> = {
+const SEVERITY_ICONS: Record<Severity, string> = {
   critical: "\u26D4",
   warning: "\u26A0\uFE0F",
   info: "\u2139\uFE0F",
@@ -30,7 +30,7 @@ export default function Recommendations({ recommendations }: Props) {
         {recommendations.map((r, i) => (
           <div key={i} className={`rec rec--${r.severity}`}>
             <div className="rec__header">
-              <span className="rec__icon">{SEVERITY_ICONS[r.severity] || ""}</span>
+              <span className="rec__icon">{SEVERITY_ICONS[r.severity]}</span>
               <span className="rec__title">{r.title}</span>
               <span className={`badge badge--${r.severity}`}>{r.category}</span>
             </div>

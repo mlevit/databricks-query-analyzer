@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 
 class Severity(str, Enum):
@@ -55,21 +55,21 @@ class QueryMetrics(BaseModel):
 class TableInfo(BaseModel):
     full_name: str
     format: Optional[str] = None
-    clustering_columns: list[str] = []
-    partition_columns: list[str] = []
+    clustering_columns: list[str] = Field(default_factory=list)
+    partition_columns: list[str] = Field(default_factory=list)
     num_files: Optional[int] = None
     size_in_bytes: Optional[int] = None
-    properties: dict[str, str] = {}
-    recommendations: list[Recommendation] = []
+    properties: dict[str, str] = Field(default_factory=dict)
+    recommendations: list[Recommendation] = Field(default_factory=list)
 
 
 class PlanSummary(BaseModel):
     raw_plan: str
-    scan_types: list[str] = []
-    join_types: list[str] = []
+    scan_types: list[str] = Field(default_factory=list)
+    join_types: list[str] = Field(default_factory=list)
     has_filter_pushdown: bool = False
     has_partition_pruning: bool = False
-    warnings: list[str] = []
+    warnings: list[str] = Field(default_factory=list)
 
 
 class WarehouseInfo(BaseModel):
@@ -81,7 +81,7 @@ class WarehouseInfo(BaseModel):
     enable_photon: Optional[bool] = None
     spot_instance_policy: Optional[str] = None
     channel: Optional[str] = None
-    recommendations: list[Recommendation] = []
+    recommendations: list[Recommendation] = Field(default_factory=list)
 
 
 class AIRewriteResult(BaseModel):
@@ -92,7 +92,7 @@ class AIRewriteResult(BaseModel):
 
 class AnalysisResult(BaseModel):
     query_metrics: QueryMetrics
-    tables: list[TableInfo] = []
+    tables: list[TableInfo] = Field(default_factory=list)
     plan_summary: Optional[PlanSummary] = None
     warehouse: Optional[WarehouseInfo] = None
-    recommendations: list[Recommendation] = []
+    recommendations: list[Recommendation] = Field(default_factory=list)

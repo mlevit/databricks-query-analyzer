@@ -5,12 +5,19 @@ interface Props {
 }
 
 export default function WarehouseInfo({ warehouse }: Props) {
+  const photonValue =
+    warehouse.enable_photon === true
+      ? "Enabled"
+      : warehouse.enable_photon === false
+        ? "Disabled"
+        : "Unknown";
+
   const details: { label: string; value: string }[] = [
     { label: "Name", value: warehouse.name || "N/A" },
     { label: "Type", value: warehouse.warehouse_type || "N/A" },
     { label: "Size", value: warehouse.cluster_size || "N/A" },
     { label: "Clusters", value: warehouse.num_clusters?.toString() || "N/A" },
-    { label: "Photon", value: warehouse.enable_photon ? "Enabled" : "Disabled" },
+    { label: "Photon", value: photonValue },
     { label: "Spot Policy", value: warehouse.spot_instance_policy || "N/A" },
     { label: "Channel", value: warehouse.channel || "N/A" },
   ];

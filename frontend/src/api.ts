@@ -36,40 +36,48 @@ export async function analyzeQueryStream(
 
   const decoder = new TextDecoder();
   let buffer = "";
+  let completed = false;
 
-  while (true) {
-    const { done, value } = await reader.read();
-    if (done) break;
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
 
-    buffer += decoder.decode(value, { stream: true });
-    const lines = buffer.split("\n\n");
-    buffer = lines.pop() || "";
+      buffer += decoder.decode(value, { stream: true });
+      const lines = buffer.split("\n\n");
+      buffer = lines.pop() || "";
 
-    for (const chunk of lines) {
-      const dataLine = chunk.trim();
-      if (!dataLine.startsWith("data: ")) continue;
-      const json_str = dataLine.slice(6);
+      for (const chunk of lines) {
+        const dataLine = chunk.trim();
+        if (!dataLine.startsWith("data: ")) continue;
+        const jsonStr = dataLine.slice(6);
 
-      try {
-        const msg = JSON.parse(json_str);
+        try {
+          const msg = JSON.parse(jsonStr);
 
-        if (msg.event === "error") {
-          callbacks.onError(msg.detail || "Analysis failed");
-          return;
+          if (msg.event === "error") {
+            callbacks.onError(msg.detail || "Analysis failed");
+            completed = true;
+            return;
+          }
+
+          if (msg.event === "result" && isAnalysisResult(msg.data)) {
+            callbacks.onResult(msg.data);
+            completed = true;
+            return;
+          }
+
+          if (typeof msg.step === "number" && typeof msg.label === "string") {
+            callbacks.onProgress(msg as StepProgress);
+          }
+        } catch {
+          // ignore malformed chunks
         }
-
-        if (msg.event === "result") {
-          callbacks.onResult(msg.data as AnalysisResult);
-          return;
-        }
-
-        // Progress event
-        if (msg.step !== undefined) {
-          callbacks.onProgress(msg as StepProgress);
-        }
-      } catch {
-        // ignore malformed chunks
       }
+    }
+  } finally {
+    if (!completed) {
+      callbacks.onError("Analysis ended unexpectedly");
     }
   }
 }
@@ -78,6 +86,15 @@ export function rewriteQuery(statementId: string): Promise<AIRewriteResult> {
   return request<AIRewriteResult>(`${BASE}/rewrite/${encodeURIComponent(statementId)}`, {
     method: "POST",
   });
+}
+
+function isAnalysisResult(data: unknown): data is AnalysisResult {
+  return (
+    typeof data === "object" &&
+    data !== null &&
+    "query_metrics" in data &&
+    typeof (data as Record<string, unknown>).query_metrics === "object"
+  );
 }
 
 async function request<T>(url: string, init?: RequestInit): Promise<T> {

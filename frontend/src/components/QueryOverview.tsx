@@ -6,11 +6,11 @@ interface Props {
 
 export default function QueryOverview({ metrics }: Props) {
   const segments = [
-    { label: "Waiting for compute", ms: metrics.waiting_for_compute_duration_ms, color: "#94a3b8" },
-    { label: "Waiting at capacity", ms: metrics.waiting_at_capacity_duration_ms, color: "#f59e0b" },
-    { label: "Compilation", ms: metrics.compilation_duration_ms, color: "#8b5cf6" },
-    { label: "Execution", ms: metrics.execution_duration_ms, color: "#3b82f6" },
-    { label: "Result fetch", ms: metrics.result_fetch_duration_ms, color: "#10b981" },
+    { label: "Waiting for compute", ms: metrics.waiting_for_compute_duration_ms, color: "var(--color-slate)" },
+    { label: "Waiting at capacity", ms: metrics.waiting_at_capacity_duration_ms, color: "var(--color-amber)" },
+    { label: "Compilation", ms: metrics.compilation_duration_ms, color: "var(--color-purple)" },
+    { label: "Execution", ms: metrics.execution_duration_ms, color: "var(--color-blue)" },
+    { label: "Result fetch", ms: metrics.result_fetch_duration_ms, color: "var(--color-green)" },
   ].filter((s) => s.ms && s.ms > 0);
 
   const totalBar = segments.reduce((sum, s) => sum + (s.ms || 0), 0) || 1;
@@ -36,35 +36,41 @@ export default function QueryOverview({ metrics }: Props) {
         <pre><code>{metrics.statement_text}</code></pre>
       </div>
 
-      {segments.length > 0 && (
-        <div className="query-overview__timeline">
-          <h3>Duration Breakdown</h3>
-          <div className="timeline-bar">
-            {segments.map((s) => (
-              <div
-                key={s.label}
-                className="timeline-bar__segment"
-                style={{
-                  width: `${((s.ms || 0) / totalBar) * 100}%`,
-                  backgroundColor: s.color,
-                }}
-                title={`${s.label}: ${formatMs(s.ms || 0)}`}
-              />
-            ))}
-          </div>
-          <div className="timeline-legend">
-            {segments.map((s) => (
-              <span key={s.label} className="timeline-legend__item">
-                <span
-                  className="timeline-legend__dot"
-                  style={{ backgroundColor: s.color }}
+      <div className="query-overview__timeline">
+        <h3>Duration Breakdown</h3>
+        {segments.length > 0 ? (
+          <>
+            <div className="timeline-bar" role="img" aria-label="Duration breakdown bar chart">
+              {segments.map((s) => (
+                <div
+                  key={s.label}
+                  className="timeline-bar__segment"
+                  style={{
+                    width: `${((s.ms || 0) / totalBar) * 100}%`,
+                    backgroundColor: s.color,
+                  }}
+                  title={`${s.label}: ${formatMs(s.ms || 0)}`}
                 />
-                {s.label}: {formatMs(s.ms || 0)}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
+              ))}
+            </div>
+            <div className="timeline-legend">
+              {segments.map((s) => (
+                <span key={s.label} className="timeline-legend__item">
+                  <span
+                    className="timeline-legend__dot"
+                    style={{ backgroundColor: s.color }}
+                  />
+                  {s.label}: {formatMs(s.ms || 0)}
+                </span>
+              ))}
+            </div>
+          </>
+        ) : (
+          <p className="query-overview__no-timeline">
+            No duration breakdown available for this query.
+          </p>
+        )}
+      </div>
     </div>
   );
 }

@@ -15,8 +15,10 @@ interface Props {
 }
 
 export default function ProgressStepper({ current }: Props) {
+  const isBusy = current !== null;
+
   return (
-    <div className="stepper">
+    <div className="stepper" aria-live="polite" aria-busy={isBusy}>
       <div className="stepper__track">
         {ALL_STEPS.map((label, idx) => {
           let state: "pending" | "running" | "done" = "pending";
@@ -32,7 +34,7 @@ export default function ProgressStepper({ current }: Props) {
             <div key={idx} className={`stepper__step stepper__step--${state}`}>
               <div className="stepper__icon">
                 {state === "done" && (
-                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none">
+                  <svg width="14" height="14" viewBox="0 0 14 14" fill="none" aria-hidden="true">
                     <path
                       d="M2.5 7.5L5.5 10.5L11.5 3.5"
                       stroke="currentColor"

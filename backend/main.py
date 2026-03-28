@@ -2,7 +2,10 @@ import json
 import logging
 import os
 import queue
+import re
 import threading
+import time
+from collections import OrderedDict
 
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import FileResponse, StreamingResponse
@@ -20,7 +23,46 @@ logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Databricks Query Performance Analyzer")
 
-_analysis_cache: dict[str, AnalysisResult] = {}
+# ---------------------------------------------------------------------------
+# Bounded TTL cache for analysis results
+# ---------------------------------------------------------------------------
+_CACHE_MAX_SIZE = 200
+_CACHE_TTL_SECONDS = 30 * 60  # 30 minutes
+
+_analysis_cache: OrderedDict[str, tuple[float, AnalysisResult]] = OrderedDict()
+
+
+def _cache_get(key: str) -> AnalysisResult | None:
+    entry = _analysis_cache.get(key)
+    if entry is None:
+        return None
+    ts, result = entry
+    if time.time() - ts > _CACHE_TTL_SECONDS:
+        _analysis_cache.pop(key, None)
+        return None
+    _analysis_cache.move_to_end(key)
+    return result
+
+
+def _cache_put(key: str, result: AnalysisResult) -> None:
+    _analysis_cache[key] = (time.time(), result)
+    _analysis_cache.move_to_end(key)
+    while len(_analysis_cache) > _CACHE_MAX_SIZE:
+        _analysis_cache.popitem(last=False)
+
+
+# ---------------------------------------------------------------------------
+# Input validation
+# ---------------------------------------------------------------------------
+_STATEMENT_ID_RE = re.compile(r"^[0-9a-fA-F\-]{1,128}$")
+
+
+def _validate_statement_id(statement_id: str) -> None:
+    if not _STATEMENT_ID_RE.match(statement_id):
+        raise HTTPException(
+            status_code=400,
+            detail="Invalid statement_id format. Expected a UUID-like identifier.",
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -28,6 +70,8 @@ _analysis_cache: dict[str, AnalysisResult] = {}
 # ---------------------------------------------------------------------------
 @app.get("/api/analyze/{statement_id}/stream")
 async def analyze_stream(statement_id: str):
+    _validate_statement_id(statement_id)
+
     q: queue.Queue[dict | None] = queue.Queue()
 
     def on_progress(step: int, label: str, status: str) -> None:
@@ -36,13 +80,13 @@ async def analyze_stream(statement_id: str):
     def run() -> None:
         try:
             result = run_analysis(statement_id, on_progress=on_progress)
-            _analysis_cache[statement_id] = result
+            _cache_put(statement_id, result)
             q.put({"event": "result", "data": result.model_dump(mode="json")})
         except ValueError as exc:
             q.put({"event": "error", "detail": str(exc), "code": 404})
-        except Exception as exc:
+        except Exception:
             logger.exception("Analysis failed for %s", statement_id)
-            q.put({"event": "error", "detail": str(exc), "code": 500})
+            q.put({"event": "error", "detail": "Internal analysis error", "code": 500})
         finally:
             q.put(None)
 
@@ -68,35 +112,38 @@ async def analyze_stream(statement_id: str):
 # ---------------------------------------------------------------------------
 @app.get("/api/analyze/{statement_id}", response_model=AnalysisResult)
 async def analyze(statement_id: str):
+    _validate_statement_id(statement_id)
     try:
         result = run_analysis(statement_id)
-        _analysis_cache[statement_id] = result
+        _cache_put(statement_id, result)
         return result
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
-    except Exception as exc:
+    except Exception:
         logger.exception("Analysis failed for %s", statement_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="Internal analysis error") from None
 
 
 @app.post("/api/rewrite/{statement_id}", response_model=AIRewriteResult)
 async def rewrite(statement_id: str):
-    analysis = _analysis_cache.get(statement_id)
+    _validate_statement_id(statement_id)
+
+    analysis = _cache_get(statement_id)
     if analysis is None:
         try:
             analysis = run_analysis(statement_id)
-            _analysis_cache[statement_id] = analysis
+            _cache_put(statement_id, analysis)
         except ValueError as exc:
             raise HTTPException(status_code=404, detail=str(exc)) from exc
-        except Exception as exc:
+        except Exception:
             logger.exception("Analysis failed for %s", statement_id)
-            raise HTTPException(status_code=500, detail=str(exc)) from exc
+            raise HTTPException(status_code=500, detail="Internal analysis error") from None
 
     try:
         return rewrite_query(analysis)
-    except Exception as exc:
+    except Exception:
         logger.exception("AI rewrite failed for %s", statement_id)
-        raise HTTPException(status_code=500, detail=str(exc)) from exc
+        raise HTTPException(status_code=500, detail="AI rewrite failed") from None
 
 
 @app.get("/api/health")

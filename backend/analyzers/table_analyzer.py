@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import logging
+import re
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from backend.analyzers.sql_parser import ParsedQuery
@@ -15,8 +17,17 @@ MANY_FILES_THRESHOLD = 1000
 LARGE_TABLE_THRESHOLD = 10 * 1024 * 1024 * 1024  # 10 GB
 OVER_PARTITIONED_FILE_RATIO = 5  # files per MB on average
 
+_SAFE_TABLE_NAME_RE = re.compile(r"^[\w][\w.]*$")
+
+
+def _is_safe_table_name(name: str) -> bool:
+    return bool(_SAFE_TABLE_NAME_RE.match(name)) and len(name) <= 256
+
 
 def fetch_table_detail(table_name: str) -> dict[str, Any] | None:
+    if not _is_safe_table_name(table_name):
+        logger.warning("Skipping DESCRIBE DETAIL for unsafe table name: %s", table_name[:100])
+        return None
     try:
         rows = execute_sql(f"DESCRIBE DETAIL {table_name}")
         if rows:
@@ -30,14 +41,27 @@ def analyze_tables(
     table_names: list[str],
     parsed_query: ParsedQuery,
 ) -> list[TableInfo]:
-    results: list[TableInfo] = []
+    fetchable = [n for n in table_names if not n.lower().startswith("system.")]
+    system_tables = [n for n in table_names if n.lower().startswith("system.")]
 
+    details_map: dict[str, dict[str, Any] | None] = {}
+    if fetchable:
+        with ThreadPoolExecutor(max_workers=min(len(fetchable), 8)) as pool:
+            futures = {pool.submit(fetch_table_detail, name): name for name in fetchable}
+            for future in as_completed(futures):
+                name = futures[future]
+                try:
+                    details_map[name] = future.result()
+                except Exception:
+                    details_map[name] = None
+
+    results: list[TableInfo] = []
     for name in table_names:
-        if name.lower().startswith("system."):
+        if name in system_tables:
             results.append(TableInfo(full_name=name))
             continue
 
-        detail = fetch_table_detail(name)
+        detail = details_map.get(name)
         if detail is None:
             results.append(TableInfo(full_name=name))
             continue

@@ -1,0 +1,24 @@
+target-version = "py311"
+line-length = 100
+
+[lint]
+select = [
+    "E",    # pycodestyle errors
+    "W",    # pycodestyle warnings
+    "F",    # pyflakes
+    "I",    # isort
+    "N",    # pep8-naming
+    "UP",   # pyupgrade
+    "B",    # flake8-bugbear
+    "SIM",  # flake8-simplify
+    "ARG",  # flake8-unused-arguments
+    "RUF",  # ruff-specific rules
+]
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "B008",   # do not perform function calls in argument defaults
+    "ARG001", # unused function argument (used in FastAPI endpoints)
+]
+
+[lint.isort]
+known-first-party = ["backend"]

@@ -76,6 +76,7 @@ export default function App() {
   }, [handleAnalyze]);
 
   const recCount = result?.recommendations.length ?? 0;
+  const tabPanelId = `tabpanel-${tab.replace(/\s+/g, "-").toLowerCase()}`;
 
   return (
     <div className="app">
@@ -88,20 +89,34 @@ export default function App() {
         />
       </header>
 
-      {error && <div className="error-banner">{error}</div>}
+      {error && (
+        <div className="error-banner" role="alert">
+          <span>{error}</span>
+          <button
+            className="error-banner__dismiss"
+            onClick={() => setError(null)}
+            aria-label="Dismiss error"
+          >
+            &times;
+          </button>
+        </div>
+      )}
 
       {loading && (
-        <div className="app-body">
+        <div className="app-body" aria-busy="true">
           <ProgressStepper current={progress} />
         </div>
       )}
 
       {result && (
         <div className={`app-body ${tab === "AI Rewrite" ? "app-body--wide" : ""}`}>
-          <nav className="tabs">
+          <nav className="tabs" role="tablist" aria-label="Analysis sections">
             {TABS.map((t) => (
               <button
                 key={t}
+                role="tab"
+                aria-selected={tab === t}
+                aria-controls={`tabpanel-${t.replace(/\s+/g, "-").toLowerCase()}`}
                 className={`tabs__btn ${tab === t ? "tabs__btn--active" : ""}`}
                 onClick={() => setTab(t)}
               >
@@ -113,7 +128,7 @@ export default function App() {
             ))}
           </nav>
 
-          <main className="tab-content">
+          <main className="tab-content" role="tabpanel" id={tabPanelId} aria-label={tab}>
             {tab === "Overview" && (
               <QueryOverview metrics={result.query_metrics} />
             )}

@@ -6,28 +6,39 @@ interface Props {
   statementId: string;
 }
 
-function CopyButton({ text }: { text: string }) {
+function CopyButton({ text, label }: { text: string; label: string }) {
   const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState(false);
 
   const handleCopy = useCallback(async () => {
-    await navigator.clipboard.writeText(text);
-    setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    try {
+      await navigator.clipboard.writeText(text);
+      setCopied(true);
+      setCopyError(false);
+      setTimeout(() => setCopied(false), 2000);
+    } catch {
+      setCopyError(true);
+      setTimeout(() => setCopyError(false), 2000);
+    }
   }, [text]);
 
   return (
-    <button className="copy-btn" onClick={handleCopy} title="Copy to clipboard">
+    <button
+      className="copy-btn"
+      onClick={handleCopy}
+      aria-label={`Copy ${label} to clipboard`}
+    >
       {copied ? (
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <path d="M3 8.5L6.5 12L13 4" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"/>
         </svg>
       ) : (
-        <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+        <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <rect x="5" y="5" width="8" height="8" rx="1.5" stroke="currentColor" strokeWidth="1.5"/>
           <path d="M3 11V3.5C3 2.67 3.67 2 4.5 2H10" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round"/>
         </svg>
       )}
-      {copied ? "Copied" : "Copy"}
+      {copyError ? "Failed" : copied ? "Copied" : "Copy"}
     </button>
   );
 }
@@ -39,6 +50,10 @@ type DiffLine = { type: "equal" | "added" | "removed"; text: string };
 function computeDiff(a: string, b: string): DiffLine[] {
   const aLines = a.split("\n");
   const bLines = b.split("\n");
+
+  if (aLines.length > 500 || bLines.length > 500) {
+    return [{ type: "equal", text: "(Query too large for inline diff)" }];
+  }
 
   const lcs = buildLCS(aLines, bLines);
   const result: DiffLine[] = [];
@@ -200,7 +215,7 @@ export default function AIRewrite({ statementId }: Props) {
         </button>
       )}
 
-      {error && <p className="ai-rewrite__error">{error}</p>}
+      {error && <p className="ai-rewrite__error" role="alert">{error}</p>}
 
       {result && (
         <div className="ai-rewrite__result">
@@ -218,14 +233,14 @@ export default function AIRewrite({ statementId }: Props) {
             <div className="ai-rewrite__col">
               <h3>Original</h3>
               <div className="ai-rewrite__code-wrap">
-                <CopyButton text={result.original_sql} />
+                <CopyButton text={result.original_sql} label="original query" />
                 <pre><code>{result.original_sql}</code></pre>
               </div>
             </div>
             <div className="ai-rewrite__col">
               <h3>Suggested</h3>
               <div className="ai-rewrite__code-wrap">
-                <CopyButton text={result.suggested_sql} />
+                <CopyButton text={result.suggested_sql} label="suggested query" />
                 <pre><code>{result.suggested_sql}</code></pre>
               </div>
             </div>

@@ -13,14 +13,15 @@ export default function PlanSummary({ plan }: Props) {
       <h2>Execution Plan</h2>
 
       <div className="plan-summary__chips">
-        {plan.has_filter_pushdown && (
+        {plan.has_filter_pushdown ? (
           <span className="badge badge--success">Filter Pushdown</span>
-        )}
-        {!plan.has_filter_pushdown && (
+        ) : (
           <span className="badge badge--warning">No Filter Pushdown</span>
         )}
-        {plan.has_partition_pruning && (
+        {plan.has_partition_pruning ? (
           <span className="badge badge--success">Partition Pruning</span>
+        ) : (
+          <span className="badge badge--warning">No Partition Pruning</span>
         )}
       </div>
 
@@ -64,11 +65,13 @@ export default function PlanSummary({ plan }: Props) {
       <button
         className="plan-summary__toggle"
         onClick={() => setShowRaw(!showRaw)}
+        aria-expanded={showRaw}
+        aria-controls="plan-raw-output"
       >
         {showRaw ? "Hide" : "Show"} Raw Plan
       </button>
       {showRaw && (
-        <pre className="plan-summary__raw">
+        <pre className="plan-summary__raw" id="plan-raw-output">
           <code>{plan.raw_plan}</code>
         </pre>
       )}
