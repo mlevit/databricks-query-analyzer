@@ -123,6 +123,36 @@ class TestValidateSql:
         assert valid is False
         assert len(errors) > 0
 
+    def test_analyze_table_not_a_query(self):
+        sql = "ANALYZE TABLE my_table COMPUTE STATISTICS;"
+        valid, errors = _validate_sql(sql)
+        assert valid is False
+        assert any("ANALYZE" in e for e in errors)
+
+    def test_alter_table_not_a_query(self):
+        sql = "ALTER TABLE my_table CLUSTER BY (col1);"
+        valid, errors = _validate_sql(sql)
+        assert valid is False
+        assert any("ALTER" in e for e in errors)
+
+    def test_optimize_not_a_query(self):
+        sql = "OPTIMIZE my_table;"
+        valid, errors = _validate_sql(sql)
+        assert valid is False
+        assert any("OPTIMIZE" in e for e in errors)
+
+    def test_comment_before_select_ok(self):
+        sql = "-- optimized query\nSELECT id FROM t"
+        valid, errors = _validate_sql(sql)
+        assert valid is True
+        assert errors == []
+
+    def test_with_select_ok(self):
+        sql = "WITH cte AS (SELECT 1) SELECT * FROM cte"
+        valid, errors = _validate_sql(sql)
+        assert valid is True
+        assert errors == []
+
     def test_unpivot_single_quoted_alias_flagged(self):
         sql = """
         SELECT * FROM sales

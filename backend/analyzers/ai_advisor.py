@@ -36,12 +36,17 @@ def build_rewrite_prompt(analysis: AnalysisResult) -> str:
 
     parts.append(
         "\n## Instructions\n"
-        "1. Rewrite the SQL query to address the issues above.\n"
-        "2. The rewritten query MUST be valid **Databricks SQL** syntax. Do not use "
+        "1. Rewrite the original SQL query to address the issues above.\n"
+        "2. The rewritten SQL MUST be a query (SELECT / WITH ... SELECT) that returns "
+        "the same result set as the original. Do NOT replace the query with DDL, "
+        "utility statements (e.g., ANALYZE TABLE, OPTIMIZE, ALTER TABLE), or comments. "
+        "If you want to recommend maintenance actions, mention them only in the "
+        "EXPLANATION section.\n"
+        "3. The rewritten query MUST be valid **Databricks SQL** syntax. Do not use "
         "syntax from other SQL dialects (e.g., PostgreSQL, MySQL, T-SQL).\n"
-        "3. Only make changes that preserve the same result set.\n"
-        "4. If no meaningful rewrite is possible, return the original query unchanged.\n"
-        "5. Format your response as:\n"
+        "4. Only make changes that preserve the same result set.\n"
+        "5. If no meaningful rewrite is possible, return the original query unchanged.\n"
+        "6. Format your response as:\n"
         "OPTIMIZED SQL:\n```sql\n<your rewritten query>\n```\n"
         "EXPLANATION:\n<brief explanation of changes>\n"
         "\n## Databricks SQL Syntax Reminders\n"
@@ -137,8 +142,36 @@ def _validate_sql(sql: str) -> tuple[bool, list[str]]:
         errors.append(str(exc))
 
     errors.extend(_lint_databricks_sql(sql))
+    errors.extend(_check_is_query(sql))
 
     return (len(errors) == 0), errors
+
+
+_QUERY_PREFIXES = {"SELECT", "WITH", "FROM", "TABLE", "VALUES", "("}
+
+
+def _check_is_query(sql: str) -> list[str]:
+    """Verify the rewrite is a query, not DDL or utility statements."""
+    stripped = sql.strip().rstrip(";").strip()
+    while stripped.startswith("--"):
+        newline = stripped.find("\n")
+        if newline == -1:
+            stripped = ""
+            break
+        stripped = stripped[newline + 1:].lstrip()
+    while stripped.startswith("/*"):
+        end = stripped.find("*/")
+        if end == -1:
+            break
+        stripped = stripped[end + 2:].lstrip()
+
+    first_word = stripped.split()[0].upper() if stripped.split() else ""
+    if first_word and first_word not in _QUERY_PREFIXES:
+        return [
+            f"Rewrite starts with '{first_word}' instead of a SELECT query. "
+            "The AI produced DDL or utility statements instead of a rewritten query."
+        ]
+    return []
 
 
 # Matches UNPIVOT/PIVOT blocks, then looks for single-quoted aliases inside them.
