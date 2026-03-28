@@ -7,7 +7,7 @@ from backend.models import AIRewriteResult, AnalysisResult
 
 logger = logging.getLogger(__name__)
 
-AI_MODEL = "databricks-claude-sonnet-4-5"
+AI_MODEL = "databricks-claude-opus-4-6"
 
 
 def build_rewrite_prompt(analysis: AnalysisResult) -> str:
