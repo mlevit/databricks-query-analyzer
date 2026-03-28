@@ -97,7 +97,7 @@ export default function App() {
       )}
 
       {result && (
-        <div className="app-body">
+        <div className={`app-body ${tab === "AI Rewrite" ? "app-body--wide" : ""}`}>
           <nav className="tabs">
             {TABS.map((t) => (
               <button

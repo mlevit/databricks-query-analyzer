@@ -32,6 +32,93 @@ function CopyButton({ text }: { text: string }) {
   );
 }
 
+// ---- Simple line-level diff (Myers-like LCS) ----
+
+type DiffLine = { type: "equal" | "added" | "removed"; text: string };
+
+function computeDiff(a: string, b: string): DiffLine[] {
+  const aLines = a.split("\n");
+  const bLines = b.split("\n");
+
+  const lcs = buildLCS(aLines, bLines);
+  const result: DiffLine[] = [];
+  let ai = 0;
+  let bi = 0;
+
+  for (const [la, lb] of lcs) {
+    while (ai < la) result.push({ type: "removed", text: aLines[ai++] });
+    while (bi < lb) result.push({ type: "added", text: bLines[bi++] });
+    result.push({ type: "equal", text: aLines[ai] });
+    ai++;
+    bi++;
+  }
+  while (ai < aLines.length) result.push({ type: "removed", text: aLines[ai++] });
+  while (bi < bLines.length) result.push({ type: "added", text: bLines[bi++] });
+
+  return result;
+}
+
+function buildLCS(a: string[], b: string[]): [number, number][] {
+  const m = a.length;
+  const n = b.length;
+  const dp: number[][] = Array.from({ length: m + 1 }, () => Array(n + 1).fill(0));
+
+  for (let i = m - 1; i >= 0; i--) {
+    for (let j = n - 1; j >= 0; j--) {
+      if (a[i].trim() === b[j].trim()) {
+        dp[i][j] = dp[i + 1][j + 1] + 1;
+      } else {
+        dp[i][j] = Math.max(dp[i + 1][j], dp[i][j + 1]);
+      }
+    }
+  }
+
+  const pairs: [number, number][] = [];
+  let i = 0;
+  let j = 0;
+  while (i < m && j < n) {
+    if (a[i].trim() === b[j].trim()) {
+      pairs.push([i, j]);
+      i++;
+      j++;
+    } else if (dp[i + 1][j] >= dp[i][j + 1]) {
+      i++;
+    } else {
+      j++;
+    }
+  }
+  return pairs;
+}
+
+function DiffView({ original, suggested }: { original: string; suggested: string }) {
+  const lines = computeDiff(original, suggested);
+
+  if (lines.every((l) => l.type === "equal")) {
+    return (
+      <div className="diff-view">
+        <p className="diff-view__identical">No differences — the suggested query is identical.</p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="diff-view">
+      <pre className="diff-view__code">
+        {lines.map((line, i) => (
+          <div key={i} className={`diff-line diff-line--${line.type}`}>
+            <span className="diff-line__marker">
+              {line.type === "added" ? "+" : line.type === "removed" ? "−" : " "}
+            </span>
+            <span className="diff-line__text">{line.text || " "}</span>
+          </div>
+        ))}
+      </pre>
+    </div>
+  );
+}
+
+// ---- Explanation formatting ----
+
 function formatExplanation(text: string) {
   const lines = text.split("\n").filter((l) => l.trim());
 
@@ -74,6 +161,8 @@ function inlineBold(text: string): React.ReactNode {
     return part;
   });
 }
+
+// ---- Main component ----
 
 export default function AIRewrite({ statementId }: Props) {
   const [result, setResult] = useState<AIRewriteResult | null>(null);
@@ -120,6 +209,10 @@ export default function AIRewrite({ statementId }: Props) {
             <div className="ai-rewrite__explanation-body">
               {formatExplanation(result.explanation)}
             </div>
+          </div>
+          <div className="ai-rewrite__section">
+            <h3>Diff</h3>
+            <DiffView original={result.original_sql} suggested={result.suggested_sql} />
           </div>
           <div className="ai-rewrite__columns">
             <div className="ai-rewrite__col">

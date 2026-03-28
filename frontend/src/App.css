@@ -26,6 +26,11 @@
   max-width: 1200px;
   margin: 0 auto;
   padding: 1.5rem;
+  transition: max-width 0.2s;
+}
+
+.app-body--wide {
+  max-width: 1600px;
 }
 
 .app-empty {
@@ -626,6 +631,7 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 1rem;
+  margin-top: 0.75rem;
   margin-bottom: 1rem;
 }
 
@@ -823,6 +829,80 @@
   to {
     transform: rotate(360deg);
   }
+}
+
+/* ---- Diff view ---- */
+.ai-rewrite__section {
+  margin-top: 1rem;
+  margin-bottom: 0.25rem;
+}
+
+.ai-rewrite__section h3 {
+  margin-bottom: 0.5rem;
+}
+
+.diff-view {
+  border: 1px solid #e2e8f0;
+  border-radius: 8px;
+  overflow: hidden;
+  background: #fafbfc;
+}
+
+.diff-view__identical {
+  padding: 1rem;
+  color: #64748b;
+  font-style: italic;
+  margin: 0;
+}
+
+.diff-view__code {
+  margin: 0;
+  padding: 0;
+  font-family: "SFMono-Regular", "Consolas", "Liberation Mono", "Menlo", monospace;
+  font-size: 0.82rem;
+  line-height: 1.55;
+  overflow-x: auto;
+}
+
+.diff-line {
+  display: flex;
+  min-height: 1.55em;
+  padding: 0 0.75rem;
+}
+
+.diff-line--added {
+  background: #dcfce7;
+}
+
+.diff-line--removed {
+  background: #fee2e2;
+  text-decoration: line-through;
+  text-decoration-color: rgba(185, 28, 28, 0.35);
+}
+
+.diff-line--equal {
+  background: transparent;
+}
+
+.diff-line__marker {
+  flex-shrink: 0;
+  width: 1.2rem;
+  text-align: center;
+  user-select: none;
+  color: #94a3b8;
+  font-weight: 600;
+}
+
+.diff-line--added .diff-line__marker {
+  color: #16a34a;
+}
+
+.diff-line--removed .diff-line__marker {
+  color: #dc2626;
+}
+
+.diff-line__text {
+  white-space: pre;
 }
 
 /* ---- Responsive ---- */
