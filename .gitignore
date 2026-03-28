@@ -1,0 +1,38 @@
+# Dependencies
+node_modules/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+
+# Environment / secrets
+.env
+.env.*
+
+# Build output
+dist/
+build/
+*.egg-info/
+
+# IDE / editor
+.cursor/
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Databricks
+.databricks/
+
+# Logs
+*.log
+
+# Package lock (optional — remove if you want to pin)
+package-lock.json
