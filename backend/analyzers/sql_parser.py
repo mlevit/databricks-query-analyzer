@@ -9,6 +9,8 @@ from sqlglot import exp
 logger = logging.getLogger(__name__)
 
 LARGE_IN_LIST_THRESHOLD = 50
+DEEP_NESTING_THRESHOLD = 4
+HIGH_GROUP_BY_COLUMNS = 5
 
 
 @dataclass
@@ -36,6 +38,16 @@ class ParsedQuery:
     large_in_list_count: int = 0
     has_count_distinct: bool = False
     has_complex_or_filter: bool = False
+    # Additional pattern flags
+    has_scalar_subquery_in_select: bool = False
+    has_distinct_with_joins: bool = False
+    repeated_union_all_tables: list[str] = field(default_factory=list)
+    max_nesting_depth: int = 0
+    has_implicit_cast_in_predicate: bool = False
+    has_or_different_columns: bool = False
+    has_missing_join_predicate: bool = False
+    has_order_by_without_limit: bool = False
+    group_by_column_count: int = 0
 
 
 @dataclass
@@ -76,6 +88,15 @@ def parse_query(sql: str) -> ParsedQuery:
         _check_large_in_list(statement, result)
         _check_count_distinct(statement, result)
         _check_complex_or_filter(statement, result)
+        _check_scalar_subquery_in_select(statement, result)
+        _check_distinct_with_joins(statement, result)
+        _check_repeated_table_in_union_all(statement, result)
+        _check_deep_nesting(statement, result)
+        _check_implicit_cast_in_predicate(statement, result)
+        _check_or_different_columns(statement, result)
+        _check_missing_join_predicate(statement, result)
+        _check_order_by_without_limit(statement, result)
+        _check_group_by_columns(statement, result)
 
     result.tables = list(dict.fromkeys(result.tables))
     return result
@@ -350,6 +371,186 @@ def _count_or_branches(expr: exp.Expression) -> int:
     if isinstance(expr, exp.Or):
         return _count_or_branches(expr.left) + _count_or_branches(expr.right)
     return 1
+
+
+# ---------------------------------------------------------------------------
+# A10: Scalar subqueries in SELECT (N+1 pattern)
+# ---------------------------------------------------------------------------
+def _check_scalar_subquery_in_select(node: exp.Expression, result: ParsedQuery) -> None:
+    for select in node.find_all(exp.Select):
+        for expr in select.expressions:
+            target = expr.this if isinstance(expr, exp.Alias) else expr
+            if isinstance(target, exp.Subquery):
+                result.has_scalar_subquery_in_select = True
+                return
+
+
+# ---------------------------------------------------------------------------
+# A11: DISTINCT used alongside JOINs (fan-out mask)
+# ---------------------------------------------------------------------------
+def _check_distinct_with_joins(node: exp.Expression, result: ParsedQuery) -> None:
+    for select in node.find_all(exp.Select):
+        if not select.args.get("distinct"):
+            continue
+        parent = select.parent
+        if isinstance(parent, exp.Subquery):
+            grandparent = parent.parent
+            if isinstance(grandparent, exp.Exists):
+                continue
+        scope = select.parent if select.parent else select
+        if scope.find(exp.Join):
+            result.has_distinct_with_joins = True
+            return
+
+
+# ---------------------------------------------------------------------------
+# A12: Same table scanned multiple times in UNION ALL branches
+# ---------------------------------------------------------------------------
+def _check_repeated_table_in_union_all(node: exp.Expression, result: ParsedQuery) -> None:
+    for union in node.find_all(exp.Union):
+        if isinstance(union, (exp.Intersect, exp.Except)):
+            continue
+        if union.args.get("distinct") is not False:
+            continue
+
+        branches: list[exp.Expression] = []
+        _collect_union_all_branches(union, branches)
+        if len(branches) < 2:
+            continue
+
+        table_counts: dict[str, int] = {}
+        for branch in branches:
+            branch_tables: set[str] = set()
+            for table in branch.find_all(exp.Table):
+                name = table.name.lower() if table.name else ""
+                if name:
+                    branch_tables.add(name)
+            for t in branch_tables:
+                table_counts[t] = table_counts.get(t, 0) + 1
+
+        for table_name, count in table_counts.items():
+            if count > 1:
+                result.repeated_union_all_tables.append(table_name)
+
+    result.repeated_union_all_tables = list(dict.fromkeys(result.repeated_union_all_tables))
+
+
+def _collect_union_all_branches(
+    node: exp.Expression, branches: list[exp.Expression],
+) -> None:
+    """Recursively collect leaf SELECT branches of a UNION ALL chain."""
+    if isinstance(node, exp.Union) and node.args.get("distinct") is False:
+        _collect_union_all_branches(node.left, branches)
+        _collect_union_all_branches(node.right, branches)
+    else:
+        branches.append(node)
+
+
+# ---------------------------------------------------------------------------
+# A13: Deeply nested subqueries / CTEs
+# ---------------------------------------------------------------------------
+def _check_deep_nesting(node: exp.Expression, result: ParsedQuery) -> None:
+    depth = _measure_subquery_depth(node, 0)
+    result.max_nesting_depth = max(result.max_nesting_depth, depth)
+
+
+def _measure_subquery_depth(node: exp.Expression, current: int) -> int:
+    max_depth = current
+    for child in node.find_all(exp.Subquery):
+        if child is node:
+            continue
+        max_depth = max(max_depth, _measure_subquery_depth(child, current + 1))
+    return max_depth
+
+
+# ---------------------------------------------------------------------------
+# A14: CAST / TRY_CAST wrapping a column in WHERE or JOIN ON
+# ---------------------------------------------------------------------------
+def _check_implicit_cast_in_predicate(node: exp.Expression, result: ParsedQuery) -> None:
+    for cast_node in node.find_all(exp.Cast):
+        if not isinstance(cast_node.this, exp.Column):
+            continue
+        parent = cast_node.parent
+        while parent:
+            if isinstance(parent, (exp.Where, exp.Join)):
+                result.has_implicit_cast_in_predicate = True
+                return
+            if isinstance(parent, (exp.Select,)):
+                break
+            parent = parent.parent
+
+
+# ---------------------------------------------------------------------------
+# A15: OR branches referencing different columns in WHERE
+# ---------------------------------------------------------------------------
+def _check_or_different_columns(node: exp.Expression, result: ParsedQuery) -> None:
+    for where in node.find_all(exp.Where):
+        if _or_spans_different_columns(where.this):
+            result.has_or_different_columns = True
+            return
+
+
+def _or_spans_different_columns(expr: exp.Expression) -> bool:
+    """Return True if an OR expression has branches referencing different columns."""
+    if not isinstance(expr, exp.Or):
+        return False
+    branch_columns: list[set[str]] = []
+    _collect_or_branch_columns(expr, branch_columns)
+    if len(branch_columns) < 2:
+        return False
+    first = branch_columns[0]
+    return any(cols != first for cols in branch_columns[1:])
+
+
+def _collect_or_branch_columns(
+    expr: exp.Expression, result: list[set[str]],
+) -> None:
+    if isinstance(expr, exp.Or):
+        _collect_or_branch_columns(expr.left, result)
+        _collect_or_branch_columns(expr.right, result)
+    else:
+        cols = {col.name.lower() for col in expr.find_all(exp.Column)}
+        result.append(cols)
+
+
+# ---------------------------------------------------------------------------
+# A16: JOIN without ON clause (not CROSS JOIN) — silent cartesian
+# ---------------------------------------------------------------------------
+def _check_missing_join_predicate(node: exp.Expression, result: ParsedQuery) -> None:
+    for join in node.find_all(exp.Join):
+        kind = (join.kind or "").upper()
+        if kind == "CROSS":
+            continue
+        on_clause = join.args.get("on")
+        using_clause = join.args.get("using")
+        if not on_clause and not using_clause:
+            result.has_missing_join_predicate = True
+            return
+
+
+# ---------------------------------------------------------------------------
+# A17: ORDER BY without LIMIT at the outermost query level
+# ---------------------------------------------------------------------------
+def _check_order_by_without_limit(node: exp.Expression, result: ParsedQuery) -> None:
+    order = node.find(exp.Order)
+    if not order:
+        return
+    parent = order.parent
+    while parent:
+        if isinstance(parent, exp.Subquery):
+            return
+        parent = parent.parent
+    if not node.find(exp.Limit):
+        result.has_order_by_without_limit = True
+
+
+# ---------------------------------------------------------------------------
+# A18: GROUP BY with many columns (high-cardinality heuristic)
+# ---------------------------------------------------------------------------
+def _check_group_by_columns(node: exp.Expression, result: ParsedQuery) -> None:
+    for group in node.find_all(exp.Group):
+        col_count = len(list(group.find_all(exp.Column)))
+        result.group_by_column_count = max(result.group_by_column_count, col_count)
 
 
 # ---------------------------------------------------------------------------

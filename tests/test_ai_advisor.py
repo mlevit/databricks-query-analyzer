@@ -1,6 +1,6 @@
-"""Tests for backend.analyzers.ai_advisor._parse_ai_response."""
+"""Tests for backend.analyzers.ai_advisor."""
 
-from backend.analyzers.ai_advisor import _parse_ai_response
+from backend.analyzers.ai_advisor import _parse_ai_response, _validate_sql
 
 
 class TestParseAIResponse:
@@ -80,3 +80,45 @@ class TestParseAIResponse:
         sql, explanation = _parse_ai_response(response, "ORIGINAL")
         assert sql == "SELECT 1"
         assert "real explanation" in explanation
+
+
+class TestValidateSql:
+    def test_valid_select(self):
+        valid, errors = _validate_sql("SELECT id, name FROM customers WHERE id = 1")
+        assert valid is True
+        assert errors == []
+
+    def test_valid_complex_query(self):
+        sql = """
+        WITH cte AS (
+            SELECT id, COUNT(*) AS cnt FROM orders GROUP BY id
+        )
+        SELECT c.name, cte.cnt
+        FROM customers c
+        JOIN cte ON c.id = cte.id
+        ORDER BY cte.cnt DESC
+        LIMIT 10
+        """
+        valid, errors = _validate_sql(sql)
+        assert valid is True
+        assert errors == []
+
+    def test_invalid_syntax(self):
+        valid, errors = _validate_sql("SELEC id FORM t WERE x = 1")
+        assert valid is False
+        assert len(errors) > 0
+
+    def test_unclosed_parenthesis(self):
+        valid, errors = _validate_sql("SELECT * FROM t WHERE id IN (1, 2, 3")
+        assert valid is False
+        assert len(errors) > 0
+
+    def test_empty_string(self):
+        valid, errors = _validate_sql("")
+        assert valid is False
+        assert len(errors) > 0
+
+    def test_whitespace_only(self):
+        valid, errors = _validate_sql("   ")
+        assert valid is False
+        assert len(errors) > 0

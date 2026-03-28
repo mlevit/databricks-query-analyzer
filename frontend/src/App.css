@@ -753,6 +753,24 @@
   font-size: 0.82rem;
 }
 
+.ai-rewrite__syntax-warning {
+  background: var(--color-yellow-bg, #fef3cd);
+  border: 1px solid var(--color-yellow-border, #ffc107);
+  color: var(--color-yellow-text, #664d03);
+  border-radius: 6px;
+  padding: 0.75rem 1rem;
+  margin-bottom: 0.85rem;
+  font-size: 0.85rem;
+  line-height: 1.5;
+}
+
+.ai-rewrite__syntax-errors {
+  margin: 0.35rem 0 0 1.2rem;
+  padding: 0;
+  font-family: var(--font-mono, monospace);
+  font-size: 0.8rem;
+}
+
 .ai-rewrite__columns {
   display: grid;
   grid-template-columns: 1fr 1fr;

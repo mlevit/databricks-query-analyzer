@@ -78,4 +78,6 @@ export interface AIRewriteResult {
   original_sql: string;
   suggested_sql: string;
   explanation: string;
+  syntax_valid: boolean;
+  syntax_errors: string[];
 }

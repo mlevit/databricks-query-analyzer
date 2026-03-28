@@ -185,6 +185,163 @@ class TestOrderInSubquery:
         assert result.has_order_by_in_subquery is False
 
 
+class TestScalarSubqueryInSelect:
+    def test_scalar_subquery_detected(self):
+        sql = """
+        SELECT
+            c.name,
+            (SELECT MAX(amount) FROM orders o WHERE o.cid = c.id) AS max_amt
+        FROM customers c
+        """
+        result = parse_query(sql)
+        assert result.has_scalar_subquery_in_select is True
+
+    def test_no_subquery_in_select(self):
+        result = parse_query("SELECT id, name FROM t")
+        assert result.has_scalar_subquery_in_select is False
+
+    def test_subquery_in_where_not_flagged(self):
+        result = parse_query("SELECT id FROM t WHERE id IN (SELECT id FROM s)")
+        assert result.has_scalar_subquery_in_select is False
+
+
+class TestDistinctWithJoins:
+    def test_distinct_with_join(self):
+        sql = "SELECT DISTINCT a.id FROM a JOIN b ON a.id = b.id"
+        result = parse_query(sql)
+        assert result.has_distinct_with_joins is True
+
+    def test_distinct_without_join(self):
+        result = parse_query("SELECT DISTINCT id FROM t")
+        assert result.has_distinct_with_joins is False
+
+    def test_no_distinct_with_join(self):
+        result = parse_query("SELECT a.id FROM a JOIN b ON a.id = b.id")
+        assert result.has_distinct_with_joins is False
+
+
+class TestRepeatedTableInUnionAll:
+    def test_same_table_in_union_all(self):
+        sql = """
+        SELECT id FROM orders WHERE status = 'A'
+        UNION ALL
+        SELECT id FROM orders WHERE status = 'B'
+        """
+        result = parse_query(sql)
+        assert "orders" in result.repeated_union_all_tables
+
+    def test_different_tables_in_union_all(self):
+        sql = """
+        SELECT id FROM orders WHERE status = 'A'
+        UNION ALL
+        SELECT id FROM customers WHERE active = 1
+        """
+        result = parse_query(sql)
+        assert result.repeated_union_all_tables == []
+
+    def test_union_distinct_not_flagged(self):
+        sql = """
+        SELECT id FROM orders WHERE status = 'A'
+        UNION
+        SELECT id FROM orders WHERE status = 'B'
+        """
+        result = parse_query(sql)
+        assert result.repeated_union_all_tables == []
+
+
+class TestDeepNesting:
+    def test_deep_nesting(self):
+        sql = """
+        SELECT * FROM (
+            SELECT * FROM (
+                SELECT * FROM (
+                    SELECT * FROM (
+                        SELECT id FROM t
+                    ) d
+                ) c
+            ) b
+        ) a
+        """
+        result = parse_query(sql)
+        assert result.max_nesting_depth >= 4
+
+    def test_shallow_nesting(self):
+        result = parse_query("SELECT * FROM (SELECT id FROM t) sub")
+        assert result.max_nesting_depth < 4
+
+
+class TestImplicitCastInPredicate:
+    def test_cast_in_where(self):
+        result = parse_query("SELECT * FROM t WHERE CAST(id AS STRING) = '123'")
+        assert result.has_implicit_cast_in_predicate is True
+
+    def test_no_cast_in_where(self):
+        result = parse_query("SELECT * FROM t WHERE id = 123")
+        assert result.has_implicit_cast_in_predicate is False
+
+    def test_cast_in_select_not_flagged(self):
+        result = parse_query("SELECT CAST(id AS STRING) FROM t WHERE id = 1")
+        assert result.has_implicit_cast_in_predicate is False
+
+
+class TestOrDifferentColumns:
+    def test_or_different_columns(self):
+        result = parse_query("SELECT * FROM t WHERE a = 1 OR b = 2")
+        assert result.has_or_different_columns is True
+
+    def test_or_same_column(self):
+        result = parse_query("SELECT * FROM t WHERE a = 1 OR a = 2")
+        assert result.has_or_different_columns is False
+
+    def test_no_or(self):
+        result = parse_query("SELECT * FROM t WHERE a = 1 AND b = 2")
+        assert result.has_or_different_columns is False
+
+
+class TestMissingJoinPredicate:
+    def test_join_without_on(self):
+        result = parse_query("SELECT * FROM a JOIN b")
+        assert result.has_missing_join_predicate is True
+
+    def test_join_with_on(self):
+        result = parse_query("SELECT * FROM a JOIN b ON a.id = b.id")
+        assert result.has_missing_join_predicate is False
+
+    def test_cross_join_not_flagged(self):
+        result = parse_query("SELECT * FROM a CROSS JOIN b")
+        assert result.has_missing_join_predicate is False
+
+    def test_join_with_using(self):
+        result = parse_query("SELECT * FROM a JOIN b USING (id)")
+        assert result.has_missing_join_predicate is False
+
+
+class TestOrderByWithoutLimit:
+    def test_order_by_no_limit(self):
+        result = parse_query("SELECT id FROM t ORDER BY id")
+        assert result.has_order_by_without_limit is True
+
+    def test_order_by_with_limit(self):
+        result = parse_query("SELECT id FROM t ORDER BY id LIMIT 10")
+        assert result.has_order_by_without_limit is False
+
+    def test_no_order_by(self):
+        result = parse_query("SELECT id FROM t")
+        assert result.has_order_by_without_limit is False
+
+
+class TestGroupByManyColumns:
+    def test_many_group_by_columns(self):
+        result = parse_query(
+            "SELECT a, b, c, d, e, COUNT(*) FROM t GROUP BY a, b, c, d, e"
+        )
+        assert result.group_by_column_count >= 5
+
+    def test_few_group_by_columns(self):
+        result = parse_query("SELECT a, COUNT(*) FROM t GROUP BY a")
+        assert result.group_by_column_count < 5
+
+
 class TestMalformedInput:
     def test_empty_string(self):
         result = parse_query("")

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import logging
 
+import sqlglot
+
 from backend.db import execute_sql
 from backend.models import AIRewriteResult, AnalysisResult
 
@@ -34,9 +36,11 @@ def build_rewrite_prompt(analysis: AnalysisResult) -> str:
     parts.append(
         "\n## Instructions\n"
         "1. Rewrite the SQL query to address the issues above.\n"
-        "2. Only make changes that preserve the same result set.\n"
-        "3. If no meaningful rewrite is possible, return the original query unchanged.\n"
-        "4. Format your response as:\n"
+        "2. The rewritten query MUST be valid Databricks SQL syntax. Do not use "
+        "syntax from other SQL dialects (e.g., PostgreSQL, MySQL, T-SQL).\n"
+        "3. Only make changes that preserve the same result set.\n"
+        "4. If no meaningful rewrite is possible, return the original query unchanged.\n"
+        "5. Format your response as:\n"
         "OPTIMIZED SQL:\n```sql\n<your rewritten query>\n```\n"
         "EXPLANATION:\n<brief explanation of changes>\n"
     )
@@ -68,10 +72,14 @@ def rewrite_query(analysis: AnalysisResult) -> AIRewriteResult:
         raw_response, analysis.query_metrics.statement_text
     )
 
+    syntax_valid, syntax_errors = _validate_sql(suggested_sql)
+
     return AIRewriteResult(
         original_sql=analysis.query_metrics.statement_text,
         suggested_sql=suggested_sql,
         explanation=explanation,
+        syntax_valid=syntax_valid,
+        syntax_errors=syntax_errors,
     )
 
 
@@ -101,6 +109,21 @@ def _parse_ai_response(response: str, original_sql: str) -> tuple[str, str]:
             explanation = tail
 
     return suggested_sql, explanation
+
+
+def _validate_sql(sql: str) -> tuple[bool, list[str]]:
+    """Parse the SQL with sqlglot's Databricks dialect and return (valid, errors)."""
+    if not sql or not sql.strip():
+        return False, ["Empty SQL statement"]
+    try:
+        sqlglot.transpile(sql, read="databricks", error_level=sqlglot.ErrorLevel.RAISE)
+        return True, []
+    except sqlglot.errors.ParseError as exc:
+        errors = [e.get("description", str(e)) if isinstance(e, dict) else str(e)
+                  for e in exc.errors] if exc.errors else [str(exc)]
+        return False, errors
+    except Exception as exc:
+        return False, [str(exc)]
 
 
 def _human_bytes(b: int | None) -> str:

@@ -219,6 +219,19 @@ export default function AIRewrite({ statementId }: Props) {
 
       {result && (
         <div className="ai-rewrite__result">
+          {!result.syntax_valid && (
+            <div className="ai-rewrite__syntax-warning" role="alert">
+              <strong>Syntax warning:</strong> The suggested SQL may contain syntax
+              errors and should be reviewed before use.
+              {result.syntax_errors.length > 0 && (
+                <ul className="ai-rewrite__syntax-errors">
+                  {result.syntax_errors.map((e, i) => (
+                    <li key={i}>{e}</li>
+                  ))}
+                </ul>
+              )}
+            </div>
+          )}
           <div className="ai-rewrite__explanation">
             <h3>Explanation</h3>
             <div className="ai-rewrite__explanation-body">

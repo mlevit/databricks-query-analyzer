@@ -88,6 +88,8 @@ class AIRewriteResult(BaseModel):
     original_sql: str
     suggested_sql: str
     explanation: str
+    syntax_valid: bool = True
+    syntax_errors: list[str] = Field(default_factory=list)
 
 
 class AnalysisResult(BaseModel):

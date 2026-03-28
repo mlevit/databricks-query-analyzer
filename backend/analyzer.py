@@ -5,7 +5,13 @@ from typing import Any, Callable
 
 from backend.analyzers.plan_analyzer import analyze_plan
 from backend.analyzers.query_metrics import analyze_query_metrics, build_query_metrics
-from backend.analyzers.sql_parser import LARGE_IN_LIST_THRESHOLD, ParsedQuery, parse_query
+from backend.analyzers.sql_parser import (
+    DEEP_NESTING_THRESHOLD,
+    HIGH_GROUP_BY_COLUMNS,
+    LARGE_IN_LIST_THRESHOLD,
+    ParsedQuery,
+    parse_query,
+)
 from backend.analyzers.table_analyzer import analyze_tables
 from backend.analyzers.warehouse_analyzer import analyze_warehouse
 from backend.db import execute_sql, fetch_query_history_via_api
@@ -513,6 +519,171 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "If the ORs are on the same column, rewrite as IN (...). "
                 "If on different columns, consider splitting into UNION ALL of "
                 "simpler queries, each with a single filter condition."
+            ),
+        ))
+
+    if parsed.has_scalar_subquery_in_select:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="Scalar subquery in SELECT (N+1 pattern)",
+            description=(
+                "A subquery in the SELECT list is evaluated once per outer row, "
+                "similar to the N+1 query problem. This causes repeated correlated "
+                "lookups instead of a single efficient JOIN."
+            ),
+            action=(
+                "Rewrite the scalar subquery as a LEFT JOIN with aggregation. "
+                "For example, replace:\n"
+                "  SELECT (SELECT MAX(price) FROM orders WHERE orders.cid = c.id) FROM customers c\n"
+                "with:\n"
+                "  SELECT o.max_price FROM customers c "
+                "LEFT JOIN (SELECT cid, MAX(price) AS max_price FROM orders GROUP BY cid) o "
+                "ON c.id = o.cid"
+            ),
+        ))
+
+    if parsed.has_distinct_with_joins:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="DISTINCT used to mask fan-out join",
+            description=(
+                "SELECT DISTINCT is used alongside a JOIN, which often indicates the "
+                "join is producing duplicate rows due to a many-to-many or "
+                "one-to-many relationship. The DISTINCT hides the fan-out instead of "
+                "fixing the root cause."
+            ),
+            action=(
+                "Review the join conditions to ensure they produce a true one-to-one "
+                "match. If duplicates arise from a one-to-many relationship, "
+                "pre-aggregate the many-side before joining, or use a semi-join "
+                "(EXISTS / IN) if you only need existence checks."
+            ),
+        ))
+
+    if parsed.repeated_union_all_tables:
+        table_list = ", ".join(parsed.repeated_union_all_tables)
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="Repeated table scan in UNION ALL",
+            description=(
+                f"Table(s) [{table_list}] appear in multiple UNION ALL branches, "
+                "causing the same data to be scanned repeatedly. Each branch triggers "
+                "a full read of the table."
+            ),
+            action=(
+                "Rewrite using one-pass conditional aggregation with CASE WHEN or "
+                "the FILTER clause:\n"
+                "  SELECT\n"
+                "    COUNT(CASE WHEN status = 'A' THEN 1 END) AS count_a,\n"
+                "    COUNT(CASE WHEN status = 'B' THEN 1 END) AS count_b\n"
+                "  FROM table_name"
+            ),
+        ))
+
+    if parsed.max_nesting_depth >= DEEP_NESTING_THRESHOLD:
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.QUERY,
+            title=f"Deeply nested subqueries (depth {parsed.max_nesting_depth})",
+            description=(
+                f"The query has {parsed.max_nesting_depth} levels of subquery nesting. "
+                "Deep nesting creates optimization barriers — the query planner may "
+                "not be able to flatten or reorder operations across nesting boundaries."
+            ),
+            action=(
+                "Flatten nested subqueries into CTEs or JOINs. Each CTE is "
+                "independently optimizable, and the planner can often merge them. "
+                "Also verify that views referenced in the query aren't adding "
+                "hidden layers of nesting."
+            ),
+        ))
+
+    if parsed.has_implicit_cast_in_predicate:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="Type cast on column in predicate",
+            description=(
+                "A CAST or TRY_CAST wraps a column in a WHERE or JOIN condition. "
+                "This defeats data skipping and predicate pushdown because the engine "
+                "must evaluate the cast for every row before filtering."
+            ),
+            action=(
+                "Cast the literal/parameter side instead of the column. "
+                "For example, replace WHERE CAST(id AS STRING) = '123' with "
+                "WHERE id = 123. If types are mismatched across tables, align "
+                "the schema so casts are unnecessary."
+            ),
+        ))
+
+    if parsed.has_or_different_columns:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="OR across different columns",
+            description=(
+                "The WHERE clause uses OR to combine conditions on different columns. "
+                "This prevents partition pruning and file skipping because the engine "
+                "cannot narrow down which files to read for either condition."
+            ),
+            action=(
+                "Split the query into separate queries joined with UNION ALL, each "
+                "filtering on a single column. This allows each branch to leverage "
+                "data skipping independently:\n"
+                "  SELECT ... WHERE col_a = 1\n"
+                "  UNION ALL\n"
+                "  SELECT ... WHERE col_b = 2"
+            ),
+        ))
+
+    if parsed.has_missing_join_predicate:
+        recs.append(Recommendation(
+            severity=Severity.CRITICAL,
+            category=Category.QUERY,
+            title="Join without predicate (implicit cross join)",
+            description=(
+                "A JOIN is used without an ON or USING clause and is not an explicit "
+                "CROSS JOIN. This produces a silent cartesian product, likely yielding "
+                "incorrect and explosively large results."
+            ),
+            action="Add an ON clause with the correct join key columns.",
+        ))
+
+    if parsed.has_order_by_without_limit:
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.QUERY,
+            title="ORDER BY without LIMIT",
+            description=(
+                "The query sorts the full result set without a LIMIT. Sorting is "
+                "an expensive full-shuffle operation, and without a LIMIT the engine "
+                "must materialize and sort every row before returning results."
+            ),
+            action=(
+                "Add a LIMIT clause if only the top/bottom N rows are needed. "
+                "If the full sorted result is required, consider whether the client "
+                "or downstream process can handle ordering instead."
+            ),
+        ))
+
+    if parsed.group_by_column_count >= HIGH_GROUP_BY_COLUMNS:
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.QUERY,
+            title=f"GROUP BY on {parsed.group_by_column_count} columns",
+            description=(
+                f"The query groups by {parsed.group_by_column_count} columns, which "
+                "likely produces a very high-cardinality grouping key. High cardinality "
+                "means most groups contain only one row, making the aggregation "
+                "expensive with little reduction in data volume."
+            ),
+            action=(
+                "Review whether all GROUP BY columns are necessary. Consider "
+                "grouping on fewer high-level dimensions and using window functions "
+                "for detail-level calculations."
             ),
         ))
 

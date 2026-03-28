@@ -26,7 +26,7 @@ export default function QueryInput({ onSubmit, loading, initialValue = "" }: Pro
         <input
           id="statement-id"
           type="text"
-          placeholder="e.g. 01efb3c7-d5a0-1234-abcd-0123456789ab"
+          placeholder="Enter statement ID to analyze..."
           value={value}
           onChange={(e) => setValue(e.target.value)}
           disabled={loading}
