@@ -228,8 +228,15 @@ def _build_clustering_action(
     cluster_cols = unique_cols[:4]
     col_list = ", ".join(cluster_cols)
 
+    user_tables = [t for t in tables if not t.lower().startswith("system.")]
+    if not user_tables:
+        return (
+            "Add or adjust liquid clustering (CLUSTER BY) on the columns "
+            "used in WHERE predicates. Run OPTIMIZE on the table."
+        )
+
     lines: list[str] = []
-    for table in tables:
+    for table in user_tables:
         lines.append(f"ALTER TABLE {table} CLUSTER BY ({col_list});")
         lines.append(f"OPTIMIZE {table};")
 

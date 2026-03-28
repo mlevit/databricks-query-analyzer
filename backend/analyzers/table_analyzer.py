@@ -31,6 +31,10 @@ def analyze_tables(
     results: list[TableInfo] = []
 
     for name in table_names:
+        if name.lower().startswith("system."):
+            results.append(TableInfo(full_name=name))
+            continue
+
         detail = fetch_table_detail(name)
         if detail is None:
             results.append(TableInfo(full_name=name))
