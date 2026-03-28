@@ -181,3 +181,30 @@ class TestAnalyzeQueryMetrics:
         )
         recs = analyze_query_metrics(m)
         assert len(recs) == 0
+
+    def test_result_cache_not_used(self):
+        m = self._make_metrics(
+            from_result_cache=False,
+            execution_duration_ms=10000,
+        )
+        recs = analyze_query_metrics(m)
+        titles = [r.title for r in recs]
+        assert "Query not served from result cache" in titles
+
+    def test_result_cache_used_no_rec(self):
+        m = self._make_metrics(
+            from_result_cache=True,
+            execution_duration_ms=10000,
+        )
+        recs = analyze_query_metrics(m)
+        titles = [r.title for r in recs]
+        assert "Query not served from result cache" not in titles
+
+    def test_result_cache_short_query_no_rec(self):
+        m = self._make_metrics(
+            from_result_cache=False,
+            execution_duration_ms=1000,
+        )
+        recs = analyze_query_metrics(m)
+        titles = [r.title for r in recs]
+        assert "Query not served from result cache" not in titles

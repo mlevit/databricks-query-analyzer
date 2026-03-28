@@ -1,5 +1,5 @@
 export type Severity = "critical" | "warning" | "info";
-export type Category = "query" | "execution" | "table" | "warehouse";
+export type Category = "query" | "execution" | "table" | "warehouse" | "storage" | "data_modeling";
 
 export interface Recommendation {
   severity: Severity;
@@ -7,6 +7,7 @@ export interface Recommendation {
   title: string;
   description: string;
   action?: string;
+  snippet?: string;
 }
 
 export interface QueryMetrics {
@@ -41,6 +42,7 @@ export interface TableInfo {
   partition_columns: string[];
   num_files: number | null;
   size_in_bytes: number | null;
+  column_count: number | null;
   properties: Record<string, string>;
   recommendations: Recommendation[];
 }

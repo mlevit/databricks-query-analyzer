@@ -7,6 +7,7 @@ from backend.analyzers.plan_analyzer import analyze_plan
 from backend.analyzers.query_metrics import analyze_query_metrics, build_query_metrics
 from backend.analyzers.sql_parser import (
     DEEP_NESTING_THRESHOLD,
+    DEEP_PAGINATION_OFFSET_THRESHOLD,
     HIGH_GROUP_BY_COLUMNS,
     LARGE_IN_LIST_THRESHOLD,
     ParsedQuery,
@@ -228,6 +229,58 @@ def _cross_correlate(
                 ),
             ))
 
+    # E4: Missing join filters — plan shows no pushdown + SQL has joins
+    has_no_pushdown = any(
+        "Full scan without filter pushdown" in r.description for r in recs
+    )
+    has_joins = bool(parsed.joins)
+    if has_no_pushdown and has_joins and metrics.read_bytes and metrics.read_bytes > 500 * 1024 * 1024:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.EXECUTION,
+            title="Joins without pre-join filter pushdown",
+            description=(
+                "The query performs joins but filters are not being pushed down to "
+                "scan operators. This forces the engine to read and shuffle full "
+                "tables before applying filters, dramatically increasing I/O and "
+                "network transfer."
+            ),
+            action=(
+                "Add WHERE filters that can be applied before the join, or "
+                "restructure the query so predicates appear in the same scope as "
+                "the table they filter. Ensure filter columns are not wrapped in "
+                "functions that prevent pushdown."
+            ),
+        ))
+
+    # E5: Window PARTITION BY column not in table clustering
+    if parsed.window_partition_columns:
+        win_cols_lower = {c.lower() for c in parsed.window_partition_columns}
+        for t in tables:
+            if t.full_name.lower().startswith("system."):
+                continue
+            if not t.clustering_columns:
+                continue
+            clustering_lower = {c.lower() for c in t.clustering_columns}
+            if not win_cols_lower.intersection(clustering_lower):
+                win_cols_str = ", ".join(sorted(set(parsed.window_partition_columns))[:4])
+                recs.append(Recommendation(
+                    severity=Severity.INFO,
+                    category=Category.EXECUTION,
+                    title=f"Window PARTITION BY not aligned with clustering on {t.full_name}",
+                    description=(
+                        f"Window functions partition by [{win_cols_str}] but "
+                        f"{t.full_name} is clustered on different columns. This forces "
+                        "a full redistribute and sort for the window operation."
+                    ),
+                    action=(
+                        f"If this window pattern is common, include the partition "
+                        f"column(s) in the clustering key:\n"
+                        f"ALTER TABLE {t.full_name} CLUSTER BY ({win_cols_str});"
+                    ),
+                ))
+                break
+
 
 # ---------------------------------------------------------------------------
 # Query history fetching
@@ -298,6 +351,12 @@ def _try_explain(statement_text: str) -> PlanSummary | None:
 # SQL pattern recommendations (wired from ParsedQuery flags)
 # ---------------------------------------------------------------------------
 
+def _first_snippet(parsed: ParsedQuery, key: str) -> str | None:
+    """Return the first captured SQL snippet for a check, or None."""
+    snippets = parsed.snippets.get(key)
+    return snippets[0] if snippets else None
+
+
 def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
     recs: list[Recommendation] = []
 
@@ -308,7 +367,9 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             title="SELECT * used",
             description=(
                 "Using SELECT * reads all columns from the table, including those you "
-                "may not need. This increases I/O, memory usage, and network transfer."
+                "may not need. In Delta Lake's columnar format, each extra column is "
+                "an additional I/O operation. This also increases memory usage, shuffle "
+                "volume, and network transfer."
             ),
             action="List only the columns you need explicitly.",
         ))
@@ -323,6 +384,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "This is extremely expensive and usually unintentional."
             ),
             action="Replace with an INNER/LEFT JOIN with an appropriate ON clause.",
+            snippet=_first_snippet(parsed, "has_cross_join"),
         ))
 
     if parsed.missing_where and not parsed.has_limit:
@@ -356,12 +418,14 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             title="Function applied to filter column",
             description=(
                 "A function is applied to a column in the WHERE clause. "
-                "This prevents predicate pushdown and data skipping."
+                "This prevents Delta Lake data skipping (zone map pruning), "
+                "partition pruning, and Photon predicate pushdown."
             ),
             action=(
                 "Rewrite the predicate to keep the column bare. "
                 "E.g. replace YEAR(dt) = 2024 with dt >= '2024-01-01' AND dt < '2025-01-01'."
             ),
+            snippet=_first_snippet(parsed, "has_function_on_filter_column"),
         ))
 
     if parsed.has_function_on_join_key:
@@ -371,9 +435,11 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             title="Function applied to join key",
             description=(
                 "A function wraps a column used in a JOIN condition. "
-                "This prevents the engine from using statistics or indexes for the join."
+                "This prevents the optimizer from using clustering or distribution "
+                "keys for co-located joins, forcing a full shuffle."
             ),
             action="Pre-compute the function result in a CTE or a generated column.",
+            snippet=_first_snippet(parsed, "has_function_on_join_key"),
         ))
 
     # --- New pattern recommendations ---
@@ -384,14 +450,16 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             category=Category.QUERY,
             title="UNION used instead of UNION ALL",
             description=(
-                "UNION implicitly adds a DISTINCT step, requiring a full sort and "
-                "deduplication of the combined result set. This is significantly "
-                "more expensive than UNION ALL."
+                "UNION implicitly adds a DISTINCT step, requiring a full shuffle, "
+                "sort, and deduplication of the combined result set. On Databricks "
+                "this is significantly more expensive than UNION ALL, especially for "
+                "large analytical result sets."
             ),
             action=(
                 "If duplicate rows are acceptable (or impossible given the data), "
                 "replace UNION with UNION ALL to avoid the extra sort pass."
             ),
+            snippet=_first_snippet(parsed, "has_union_without_all"),
         ))
 
     if parsed.has_not_in_subquery:
@@ -408,6 +476,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "Rewrite using NOT EXISTS or a LEFT ANTI JOIN:\n"
                 "  WHERE NOT EXISTS (SELECT 1 FROM t2 WHERE t2.id = t1.id)"
             ),
+            snippet=_first_snippet(parsed, "has_not_in_subquery"),
         ))
 
     if parsed.has_leading_wildcard_like:
@@ -417,14 +486,15 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             title="LIKE with leading wildcard",
             description=(
                 "A LIKE pattern starting with '%' (e.g. LIKE '%value') prevents "
-                "the engine from using data skipping or any index-like optimizations. "
-                "Every row must be scanned and compared."
+                "Delta Lake data skipping and zone map pruning. Every file and row "
+                "must be scanned and compared."
             ),
             action=(
                 "If possible, restructure the filter to avoid leading wildcards. "
-                "Consider using a computed column, full-text search, or reversing "
+                "Consider using a computed column, CONTAINS(), or reversing "
                 "the string for suffix matching."
             ),
+            snippet=_first_snippet(parsed, "has_leading_wildcard_like"),
         ))
 
     if parsed.has_distinct:
@@ -457,6 +527,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "For example, replace a correlated scalar subquery with a LEFT JOIN "
                 "and aggregate."
             ),
+            snippet=_first_snippet(parsed, "has_correlated_subquery"),
         ))
 
     if parsed.has_unpartitioned_window:
@@ -474,6 +545,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "the work across partitions. If a global window is truly required, "
                 "consider pre-aggregating the data first."
             ),
+            snippet=_first_snippet(parsed, "has_unpartitioned_window"),
         ))
 
     if parsed.large_in_list_count > 0:
@@ -501,12 +573,13 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             description=(
                 "COUNT(DISTINCT col) requires a full shuffle and deduplication to "
                 "compute the exact unique count. This is expensive on high-cardinality "
-                "columns."
+                "columns across billions of rows."
             ),
             action=(
-                "If an approximate count is acceptable, use approx_count_distinct(col) "
-                "which is significantly faster (HyperLogLog-based, ~2% error)."
+                "If an approximate count is acceptable, use APPROX_COUNT_DISTINCT(col) "
+                "which is significantly faster on Databricks (HyperLogLog-based, ~2% error)."
             ),
+            snippet=_first_snippet(parsed, "has_count_distinct"),
         ))
 
     if parsed.has_complex_or_filter:
@@ -545,6 +618,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "LEFT JOIN (SELECT cid, MAX(price) AS max_price FROM orders GROUP BY cid) o "
                 "ON c.id = o.cid"
             ),
+            snippet=_first_snippet(parsed, "has_scalar_subquery_in_select"),
         ))
 
     if parsed.has_distinct_with_joins:
@@ -594,8 +668,9 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             title=f"Deeply nested subqueries (depth {parsed.max_nesting_depth})",
             description=(
                 f"The query has {parsed.max_nesting_depth} levels of subquery nesting. "
-                "Deep nesting creates optimization barriers — the query planner may "
-                "not be able to flatten or reorder operations across nesting boundaries."
+                "Deep nesting creates optimization barriers — the Databricks SQL "
+                "optimizer may not be able to push predicates through or reorder "
+                "operations across nesting boundaries. Stacked views are a common cause."
             ),
             action=(
                 "Flatten nested subqueries into CTEs or JOINs. Each CTE is "
@@ -612,8 +687,8 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             title="Type cast on column in predicate",
             description=(
                 "A CAST or TRY_CAST wraps a column in a WHERE or JOIN condition. "
-                "This defeats data skipping and predicate pushdown because the engine "
-                "must evaluate the cast for every row before filtering."
+                "This defeats Delta Lake data skipping and Photon predicate pushdown "
+                "because the engine must evaluate the cast for every row before filtering."
             ),
             action=(
                 "Cast the literal/parameter side instead of the column. "
@@ -621,6 +696,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "WHERE id = 123. If types are mismatched across tables, align "
                 "the schema so casts are unnecessary."
             ),
+            snippet=_first_snippet(parsed, "has_implicit_cast_in_predicate"),
         ))
 
     if parsed.has_or_different_columns:
@@ -630,8 +706,9 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
             title="OR across different columns",
             description=(
                 "The WHERE clause uses OR to combine conditions on different columns. "
-                "This prevents partition pruning and file skipping because the engine "
-                "cannot narrow down which files to read for either condition."
+                "This prevents Delta Lake partition pruning and zone-map-based file "
+                "skipping because the engine cannot narrow down which files to read "
+                "for either condition."
             ),
             action=(
                 "Split the query into separate queries joined with UNION ALL, each "
@@ -641,6 +718,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "  UNION ALL\n"
                 "  SELECT ... WHERE col_b = 2"
             ),
+            snippet=_first_snippet(parsed, "has_or_different_columns"),
         ))
 
     if parsed.has_missing_join_predicate:
@@ -654,6 +732,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "incorrect and explosively large results."
             ),
             action="Add an ON clause with the correct join key columns.",
+            snippet=_first_snippet(parsed, "has_missing_join_predicate"),
         ))
 
     if parsed.has_order_by_without_limit:
@@ -671,6 +750,7 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "If the full sorted result is required, consider whether the client "
                 "or downstream process can handle ordering instead."
             ),
+            snippet=_first_snippet(parsed, "has_order_by_without_limit"),
         ))
 
     if parsed.group_by_column_count >= HIGH_GROUP_BY_COLUMNS:
@@ -689,6 +769,144 @@ def _sql_pattern_recommendations(parsed: ParsedQuery) -> list[Recommendation]:
                 "grouping on fewer high-level dimensions and using window functions "
                 "for detail-level calculations."
             ),
+        ))
+
+    # --- A19–A25: New Databricks-tuned recommendations ---
+
+    if parsed.has_having_without_agg:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="HAVING clause filters non-aggregated data",
+            description=(
+                "A HAVING clause contains conditions that do not reference any "
+                "aggregate function. These filters could have been applied in the "
+                "WHERE clause before aggregation, forcing the engine to aggregate "
+                "rows it will ultimately discard."
+            ),
+            action=(
+                "Move non-aggregate conditions from HAVING to the WHERE clause. "
+                "This allows Databricks to filter rows before the aggregation step, "
+                "reducing shuffle volume and memory usage."
+            ),
+            snippet=_first_snippet(parsed, "has_having_without_agg"),
+        ))
+
+    if parsed.has_deep_pagination_offset:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title=f"Deep pagination with OFFSET >= {DEEP_PAGINATION_OFFSET_THRESHOLD}",
+            description=(
+                "The query uses a large OFFSET value for pagination. OLAP engines "
+                "like Databricks SQL must scan, sort, and discard all rows before the "
+                "offset, making deep pagination increasingly expensive."
+            ),
+            action=(
+                "Switch to keyset (seek) pagination using a WHERE clause on the "
+                "last-seen sort key value:\n"
+                "  WHERE id > :last_seen_id ORDER BY id LIMIT :page_size\n"
+                "Alternatively, materialize results into a temporary view and "
+                "paginate over it."
+            ),
+            snippet=_first_snippet(parsed, "has_deep_pagination_offset"),
+        ))
+
+    if parsed.has_exact_percentile:
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.QUERY,
+            title="Exact percentile calculation used",
+            description=(
+                "PERCENTILE_CONT / PERCENTILE_DISC require a full sort of the data "
+                "to compute exact quantiles. On large datasets this is very expensive."
+            ),
+            action=(
+                "If an approximate result is acceptable, use "
+                "APPROX_PERCENTILE(col, percentage [, accuracy]) which uses a "
+                "t-digest algorithm and is significantly faster on Databricks."
+            ),
+            snippet=_first_snippet(parsed, "has_exact_percentile"),
+        ))
+
+    if parsed.has_non_equi_join:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="Non-equality (theta) join detected",
+            description=(
+                "A JOIN condition uses only range operators (>, <, >=, <=, !=) "
+                "without an equality predicate. Databricks cannot use a "
+                "BroadcastHashJoin or ShuffledHashJoin for this pattern and must "
+                "fall back to a SortMergeJoin or BroadcastNestedLoopJoin, which "
+                "are significantly slower."
+            ),
+            action=(
+                "If possible, add an equality condition to the join (e.g. a bucketed "
+                "date key) and apply the range condition as a post-filter. Consider "
+                "pre-bucketing one side of the join to convert the range into equality."
+            ),
+            snippet=_first_snippet(parsed, "has_non_equi_join"),
+        ))
+
+    if parsed.has_count_star_for_existence:
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.QUERY,
+            title="COUNT(*) may be used for existence check",
+            description=(
+                "The query appears to use SELECT COUNT(*) to check whether rows "
+                "exist. On Databricks this can scan billions of rows when a simple "
+                "existence check would short-circuit after the first match."
+            ),
+            action=(
+                "Replace with SELECT 1 FROM table WHERE ... LIMIT 1, or use "
+                "EXISTS (SELECT 1 FROM table WHERE ...) in a subquery."
+            ),
+            snippet=_first_snippet(parsed, "has_count_star_for_existence"),
+        ))
+
+    if parsed.has_possible_udf:
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.QUERY,
+            title="Possible UDF detected",
+            description=(
+                "The query calls a function that appears to be a user-defined "
+                "function (UDF). Python and Java UDFs break Photon vectorized "
+                "execution and force row-by-row processing, which can be orders "
+                "of magnitude slower than native SQL."
+            ),
+            action=(
+                "Rewrite the UDF logic using built-in SQL functions or Spark "
+                "higher-order functions (TRANSFORM, FILTER, AGGREGATE). If a UDF "
+                "is unavoidable, consider a Scala/Java UDF over Python for better "
+                "performance, or use Pandas UDFs (vectorized UDFs) for batch processing."
+            ),
+            snippet=_first_snippet(parsed, "has_possible_udf"),
+        ))
+
+    if parsed.has_string_json_parsing:
+        recs.append(Recommendation(
+            severity=Severity.WARNING,
+            category=Category.QUERY,
+            title="String-based JSON parsing instead of VARIANT",
+            description=(
+                "The query uses legacy JSON string functions (get_json_object, "
+                "from_json, json_tuple, etc.) to extract values from JSON strings. "
+                "These functions parse JSON on every row, break Photon vectorized "
+                "execution, and prevent predicate pushdown into nested fields."
+            ),
+            action=(
+                "Migrate JSON STRING columns to the VARIANT data type and use "
+                "native : path syntax for extraction:\n"
+                "  -- Instead of: get_json_object(col, '$.customer.name')\n"
+                "  -- Use:        col:customer.name\n"
+                "  ALTER TABLE t ALTER COLUMN json_col SET DATA TYPE VARIANT;\n"
+                "For ad-hoc queries, wrap with PARSE_JSON(): "
+                "PARSE_JSON(json_col):customer.name"
+            ),
+            snippet=_first_snippet(parsed, "has_string_json_parsing"),
         ))
 
     return recs

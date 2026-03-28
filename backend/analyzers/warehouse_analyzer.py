@@ -62,6 +62,26 @@ def analyze_warehouse(warehouse_id: str) -> WarehouseInfo:
             ),
         ))
 
+    # W4: Workload isolation
+    is_serverless = config.get("enable_serverless_compute") is True
+    if not is_serverless:
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.WAREHOUSE,
+            title="Consider workload isolation",
+            description=(
+                "This warehouse is not Serverless and serves all workloads on "
+                "shared compute. Heavy ad-hoc analytical queries running alongside "
+                "dashboard refresh queries can cause resource contention and queuing."
+            ),
+            action=(
+                "Use separate SQL warehouses for different workload types: "
+                "one for interactive dashboards, one for ad-hoc analysis, and one "
+                "for scheduled ETL. Serverless warehouses auto-scale and provide "
+                "built-in isolation."
+            ),
+        ))
+
     return WarehouseInfo(
         warehouse_id=config.get("warehouse_id", warehouse_id),
         name=config.get("name"),

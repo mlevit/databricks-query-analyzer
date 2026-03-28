@@ -113,6 +113,7 @@ def get_warehouse_config(warehouse_id: str) -> dict[str, Any]:
         "cluster_size": wh.cluster_size,
         "num_clusters": wh.num_clusters,
         "enable_photon": wh.enable_photon,
+        "enable_serverless_compute": wh.enable_serverless_compute,
         "spot_instance_policy": wh.spot_instance_policy.value if wh.spot_instance_policy else None,
         "channel": wh.channel.name.value if wh.channel and wh.channel.name else None,
     }

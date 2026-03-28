@@ -706,6 +706,24 @@
   line-height: 1.5;
 }
 
+.rec__snippet {
+  background: rgba(0, 0, 0, 0.04);
+  border-left: 3px solid var(--color-border, #d0d0d0);
+  padding: 0.4rem 0.6rem;
+  margin: 0.25rem 0 0.4rem;
+  border-radius: 4px;
+  font-size: 0.75rem;
+  line-height: 1.45;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+
+.rec__snippet code {
+  font-family: "SF Mono", "Menlo", "Consolas", monospace;
+  color: var(--color-text);
+}
+
 .rec__action {
   font-size: 0.78rem;
   color: var(--color-text);

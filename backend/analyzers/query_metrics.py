@@ -282,6 +282,29 @@ def analyze_query_metrics(
                 ),
             ))
 
+    # B9: Result caching not leveraged
+    if (
+        metrics.from_result_cache is False
+        and metrics.execution_duration_ms
+        and metrics.execution_duration_ms > 5000
+    ):
+        recs.append(Recommendation(
+            severity=Severity.INFO,
+            category=Category.EXECUTION,
+            title="Query not served from result cache",
+            description=(
+                "This query was not served from the result cache. If this query "
+                "runs frequently with identical parameters, result caching can "
+                "return results instantly without re-executing."
+            ),
+            action=(
+                "Ensure result caching is enabled on the SQL warehouse. Databricks "
+                "automatically caches results for identical queries for up to 24 hours. "
+                "Avoid non-deterministic functions (CURRENT_TIMESTAMP, RAND) that "
+                "prevent cache hits."
+            ),
+        ))
+
     return recs
 
 

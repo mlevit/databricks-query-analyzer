@@ -59,6 +59,20 @@ PARTITION_FILTERS_RE = re.compile(
 
 HIGH_EXCHANGE_COUNT = 5
 HIGH_SORT_COUNT = 4
+LARGE_SCAN_BYTES_THRESHOLD = 1024 * 1024 * 1024  # 1 GB
+BROADCAST_TOO_LARGE_THRESHOLD = 500 * 1024 * 1024  # 500 MB
+
+# C6: Scan size extraction near join operators
+SCAN_SIZE_RE = re.compile(
+    r"(?:File|Photon)?Scan\s+(\S+).*?sizeInBytes=(\d+)",
+    re.IGNORECASE | re.DOTALL,
+)
+
+# C7: Broadcast side size
+BROADCAST_SIZE_RE = re.compile(
+    r"Broadcast(?:Hash|NestedLoop)Join.*?(\d+)\s*bytes",
+    re.IGNORECASE | re.DOTALL,
+)
 
 
 def analyze_plan(raw_plan: str) -> PlanSummary:
@@ -123,6 +137,12 @@ def analyze_plan(raw_plan: str) -> PlanSummary:
 
     # C5: Scans with no partition pruning
     _check_scans_without_partition_pruning(raw_plan, warnings)
+
+    # C6: Two large scan sides in a join (fact-to-fact)
+    _check_large_fact_join(raw_plan, warnings)
+
+    # C7: Broadcast join with a table that's too large
+    _check_broadcast_too_large(raw_plan, warnings)
 
     return PlanSummary(
         raw_plan=raw_plan,
@@ -221,3 +241,43 @@ def _check_scans_without_partition_pruning(raw_plan: str, warnings: list[str]) -
             "The table appears to be partitioned but the query does not filter "
             "on the partition column, so all partitions are scanned."
         )
+
+
+def _check_large_fact_join(raw_plan: str, warnings: list[str]) -> None:
+    """C6: Detect joins where both scan sides exceed LARGE_SCAN_BYTES_THRESHOLD."""
+    scan_sizes: list[tuple[str, int]] = []
+    for match in SCAN_SIZE_RE.finditer(raw_plan):
+        table_name = match.group(1).strip("[](),")
+        try:
+            size = int(match.group(2))
+            scan_sizes.append((table_name, size))
+        except (ValueError, TypeError):
+            pass
+
+    large_scans = [(t, s) for t, s in scan_sizes if s >= LARGE_SCAN_BYTES_THRESHOLD]
+    if len(large_scans) >= 2:
+        tables_str = ", ".join(f"{t} ({s / (1024 ** 3):.1f} GB)" for t, s in large_scans[:3])
+        warnings.append(
+            f"Large fact-to-fact join detected: {tables_str}. "
+            "Joining two large tables directly is extremely expensive. "
+            "Consider pre-aggregating one side, joining through a dimension table, "
+            "or using a broadcast hint if one side can be reduced via filtering."
+        )
+
+
+def _check_broadcast_too_large(raw_plan: str, warnings: list[str]) -> None:
+    """C7: Detect broadcast joins where the broadcast side is too large."""
+    for match in BROADCAST_SIZE_RE.finditer(raw_plan):
+        try:
+            size = int(match.group(1))
+            if size > BROADCAST_TOO_LARGE_THRESHOLD:
+                size_mb = size / (1024 * 1024)
+                warnings.append(
+                    f"Broadcast join with large table ({size_mb:,.0f} MB). "
+                    "Broadcasting a table larger than ~500 MB can cause out-of-memory "
+                    "errors on executor nodes. Remove the broadcast hint and let the "
+                    "optimizer choose a shuffle-based join strategy instead."
+                )
+                return
+        except (ValueError, TypeError):
+            pass

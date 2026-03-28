@@ -17,6 +17,8 @@ class Category(str, Enum):
     EXECUTION = "execution"
     TABLE = "table"
     WAREHOUSE = "warehouse"
+    STORAGE = "storage"
+    DATA_MODELING = "data_modeling"
 
 
 class Recommendation(BaseModel):
@@ -25,6 +27,7 @@ class Recommendation(BaseModel):
     title: str
     description: str
     action: Optional[str] = None
+    snippet: Optional[str] = None
 
 
 class QueryMetrics(BaseModel):
@@ -52,6 +55,12 @@ class QueryMetrics(BaseModel):
     warehouse_id: Optional[str] = None
 
 
+class ColumnInfo(BaseModel):
+    name: str
+    data_type: str
+    comment: Optional[str] = None
+
+
 class TableInfo(BaseModel):
     full_name: str
     format: Optional[str] = None
@@ -59,6 +68,8 @@ class TableInfo(BaseModel):
     partition_columns: list[str] = Field(default_factory=list)
     num_files: Optional[int] = None
     size_in_bytes: Optional[int] = None
+    column_count: Optional[int] = None
+    columns: list[ColumnInfo] = Field(default_factory=list)
     properties: dict[str, str] = Field(default_factory=dict)
     recommendations: list[Recommendation] = Field(default_factory=list)
 

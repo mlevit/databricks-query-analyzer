@@ -35,6 +35,9 @@ export default function Recommendations({ recommendations }: Props) {
               <span className={`badge badge--${r.severity}`}>{r.category}</span>
             </div>
             <p className="rec__desc">{r.description}</p>
+            {r.snippet && (
+              <pre className="rec__snippet"><code>{r.snippet}</code></pre>
+            )}
             {r.action && (
               <div className="rec__action">
                 <strong>Suggested action:</strong>{" "}

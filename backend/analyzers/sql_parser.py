@@ -11,6 +11,27 @@ logger = logging.getLogger(__name__)
 LARGE_IN_LIST_THRESHOLD = 50
 DEEP_NESTING_THRESHOLD = 4
 HIGH_GROUP_BY_COLUMNS = 5
+DEEP_PAGINATION_OFFSET_THRESHOLD = 1000
+
+_JSON_STRING_FUNCTIONS = frozenset({
+    "get_json_object", "from_json", "json_tuple", "schema_of_json",
+    "json_extract", "json_extract_scalar", "to_json",
+})
+
+
+_SNIPPET_MAX_LENGTH = 200
+
+
+def _sql_snippet(node: exp.Expression, max_length: int = _SNIPPET_MAX_LENGTH) -> str:
+    """Generate a compact SQL string from an AST node, truncated if needed."""
+    try:
+        text = node.sql(dialect="spark")
+    except Exception:
+        text = str(node)
+    text = " ".join(text.split())
+    if len(text) > max_length:
+        return text[:max_length - 3] + "..."
+    return text
 
 
 @dataclass
@@ -48,6 +69,20 @@ class ParsedQuery:
     has_missing_join_predicate: bool = False
     has_order_by_without_limit: bool = False
     group_by_column_count: int = 0
+    # A19–A25 pattern flags
+    has_having_without_agg: bool = False
+    has_deep_pagination_offset: bool = False
+    has_exact_percentile: bool = False
+    has_non_equi_join: bool = False
+    has_count_star_for_existence: bool = False
+    has_possible_udf: bool = False
+    has_string_json_parsing: bool = False
+    window_partition_columns: list[str] = field(default_factory=list)
+    # SQL snippets keyed by check name → list of triggering SQL fragments
+    snippets: dict[str, list[str]] = field(default_factory=dict)
+
+    def add_snippet(self, key: str, node: exp.Expression) -> None:
+        self.snippets.setdefault(key, []).append(_sql_snippet(node))
 
 
 @dataclass
@@ -97,6 +132,14 @@ def parse_query(sql: str) -> ParsedQuery:
         _check_missing_join_predicate(statement, result)
         _check_order_by_without_limit(statement, result)
         _check_group_by_columns(statement, result)
+        _check_having_without_agg(statement, result)
+        _check_deep_pagination_offset(statement, result)
+        _check_exact_percentile(statement, result)
+        _check_non_equi_join(statement, result)
+        _check_count_star_for_existence(statement, result)
+        _check_possible_udf(statement, result)
+        _check_string_json_parsing(statement, result)
+        _extract_window_partition_columns(statement, result)
 
     result.tables = list(dict.fromkeys(result.tables))
     return result
@@ -154,6 +197,7 @@ def _extract_joins(node: exp.Expression, result: ParsedQuery) -> None:
 
         if kind and kind.upper() == "CROSS":
             result.has_cross_join = True
+            result.add_snippet("has_cross_join", join)
 
         right_table = None
         table_node = join.find(exp.Table)
@@ -175,6 +219,7 @@ def _extract_joins(node: exp.Expression, result: ParsedQuery) -> None:
                 result.join_columns.append(col.name)
                 if _is_wrapped_in_function(col):
                     result.has_function_on_join_key = True
+                    result.add_snippet("has_function_on_join_key", col.parent)
 
         result.joins.append(JoinInfo(
             join_type=full_type,
@@ -203,6 +248,11 @@ def _extract_filters(node: exp.Expression, result: ParsedQuery) -> None:
             result.filter_columns.append(col_name)
             if _is_wrapped_in_function(col):
                 result.has_function_on_filter_column = True
+                func_node = col.parent
+                while func_node and not isinstance(func_node, (exp.Anonymous, exp.Func)):
+                    func_node = func_node.parent
+                if func_node:
+                    result.add_snippet("has_function_on_filter_column", func_node)
 
             table_ref = col.table
             if table_ref:
@@ -250,6 +300,7 @@ def _check_union_without_all(node: exp.Expression, result: ParsedQuery) -> None:
         if not union.args.get("distinct") is False:
             if not isinstance(union, exp.Intersect) and not isinstance(union, exp.Except):
                 result.has_union_without_all = True
+                result.add_snippet("has_union_without_all", union)
                 return
 
 
@@ -264,6 +315,7 @@ def _check_not_in_subquery(node: exp.Expression, result: ParsedQuery) -> None:
             query = child.args.get("query")
             if query or any(isinstance(e, exp.Subquery) for e in expressions):
                 result.has_not_in_subquery = True
+                result.add_snippet("has_not_in_subquery", not_node)
                 return
 
 
@@ -277,6 +329,7 @@ def _check_leading_wildcard_like(node: exp.Expression, result: ParsedQuery) -> N
             val = pattern.this
             if isinstance(val, str) and val.startswith("%"):
                 result.has_leading_wildcard_like = True
+                result.add_snippet("has_leading_wildcard_like", like)
                 return
 
 
@@ -310,6 +363,7 @@ def _check_correlated_subquery(node: exp.Expression, result: ParsedQuery) -> Non
             table_ref = col.table
             if table_ref and table_ref.lower() in outer_tables and table_ref.lower() not in inner_tables:
                 result.has_correlated_subquery = True
+                result.add_snippet("has_correlated_subquery", subquery)
                 return
 
 
@@ -332,6 +386,7 @@ def _check_unpartitioned_window(node: exp.Expression, result: ParsedQuery) -> No
         partition_by = window.args.get("partition_by")
         if not partition_by:
             result.has_unpartitioned_window = True
+            result.add_snippet("has_unpartitioned_window", window)
             return
 
 
@@ -352,6 +407,7 @@ def _check_count_distinct(node: exp.Expression, result: ParsedQuery) -> None:
     for count in node.find_all(exp.Count):
         if count.args.get("distinct"):
             result.has_count_distinct = True
+            result.add_snippet("has_count_distinct", count)
             return
 
 
@@ -382,6 +438,7 @@ def _check_scalar_subquery_in_select(node: exp.Expression, result: ParsedQuery) 
             target = expr.this if isinstance(expr, exp.Alias) else expr
             if isinstance(target, exp.Subquery):
                 result.has_scalar_subquery_in_select = True
+                result.add_snippet("has_scalar_subquery_in_select", expr)
                 return
 
 
@@ -474,6 +531,7 @@ def _check_implicit_cast_in_predicate(node: exp.Expression, result: ParsedQuery)
         while parent:
             if isinstance(parent, (exp.Where, exp.Join)):
                 result.has_implicit_cast_in_predicate = True
+                result.add_snippet("has_implicit_cast_in_predicate", cast_node)
                 return
             if isinstance(parent, (exp.Select,)):
                 break
@@ -487,6 +545,7 @@ def _check_or_different_columns(node: exp.Expression, result: ParsedQuery) -> No
     for where in node.find_all(exp.Where):
         if _or_spans_different_columns(where.this):
             result.has_or_different_columns = True
+            result.add_snippet("has_or_different_columns", where.this)
             return
 
 
@@ -525,6 +584,7 @@ def _check_missing_join_predicate(node: exp.Expression, result: ParsedQuery) -> 
         using_clause = join.args.get("using")
         if not on_clause and not using_clause:
             result.has_missing_join_predicate = True
+            result.add_snippet("has_missing_join_predicate", join)
             return
 
 
@@ -542,6 +602,7 @@ def _check_order_by_without_limit(node: exp.Expression, result: ParsedQuery) -> 
         parent = parent.parent
     if not node.find(exp.Limit):
         result.has_order_by_without_limit = True
+        result.add_snippet("has_order_by_without_limit", order)
 
 
 # ---------------------------------------------------------------------------
@@ -551,6 +612,155 @@ def _check_group_by_columns(node: exp.Expression, result: ParsedQuery) -> None:
     for group in node.find_all(exp.Group):
         col_count = len(list(group.find_all(exp.Column)))
         result.group_by_column_count = max(result.group_by_column_count, col_count)
+
+
+# ---------------------------------------------------------------------------
+# A19: HAVING that could be WHERE (no aggregate in condition)
+# ---------------------------------------------------------------------------
+def _check_having_without_agg(node: exp.Expression, result: ParsedQuery) -> None:
+    for having in node.find_all(exp.Having):
+        condition = having.this
+        if condition and not list(condition.find_all(exp.AggFunc)):
+            result.has_having_without_agg = True
+            result.add_snippet("has_having_without_agg", having)
+            return
+
+
+# ---------------------------------------------------------------------------
+# A20: OFFSET/LIMIT deep pagination
+# ---------------------------------------------------------------------------
+def _check_deep_pagination_offset(node: exp.Expression, result: ParsedQuery) -> None:
+    for offset in node.find_all(exp.Offset):
+        val = offset.this
+        if isinstance(val, exp.Literal) and val.is_int:
+            try:
+                if int(val.this) >= DEEP_PAGINATION_OFFSET_THRESHOLD:
+                    result.has_deep_pagination_offset = True
+                    result.add_snippet("has_deep_pagination_offset", offset)
+                    return
+            except (ValueError, TypeError):
+                pass
+
+
+# ---------------------------------------------------------------------------
+# A21: Exact percentile functions (PERCENTILE_CONT / PERCENTILE_DISC)
+# ---------------------------------------------------------------------------
+def _check_exact_percentile(node: exp.Expression, result: ParsedQuery) -> None:
+    for func in node.find_all(exp.Func):
+        name = type(func).__name__.upper()
+        if name in ("PERCENTILECONT", "PERCENTILEDISC"):
+            result.has_exact_percentile = True
+            result.add_snippet("has_exact_percentile", func)
+            return
+    for anon in node.find_all(exp.Anonymous):
+        if anon.name.upper() in ("PERCENTILE_CONT", "PERCENTILE_DISC", "PERCENTILE"):
+            result.has_exact_percentile = True
+            result.add_snippet("has_exact_percentile", anon)
+            return
+
+
+# ---------------------------------------------------------------------------
+# A22: Non-equality join conditions (range/theta joins)
+# ---------------------------------------------------------------------------
+_NON_EQUI_TYPES = (exp.GT, exp.GTE, exp.LT, exp.LTE, exp.NEQ)
+
+
+def _check_non_equi_join(node: exp.Expression, result: ParsedQuery) -> None:
+    for join in node.find_all(exp.Join):
+        on_clause = join.args.get("on")
+        if not on_clause:
+            continue
+        has_eq = bool(list(on_clause.find_all(exp.EQ)))
+        has_non_eq = bool(list(on_clause.find_all(*_NON_EQUI_TYPES)))
+        if has_non_eq and not has_eq:
+            result.has_non_equi_join = True
+            result.add_snippet("has_non_equi_join", on_clause)
+            return
+
+
+# ---------------------------------------------------------------------------
+# A23: COUNT(*) for existence check
+# ---------------------------------------------------------------------------
+def _check_count_star_for_existence(node: exp.Expression, result: ParsedQuery) -> None:
+    for count in node.find_all(exp.Count):
+        if not isinstance(count.this, exp.Star):
+            continue
+        parent = count.parent
+        while parent:
+            if isinstance(parent, (exp.GT, exp.GTE, exp.EQ, exp.NEQ)):
+                result.has_count_star_for_existence = True
+                result.add_snippet("has_count_star_for_existence", parent)
+                return
+            if isinstance(parent, (exp.Select, exp.Where, exp.Having)):
+                break
+            parent = parent.parent
+
+    for select in node.find_all(exp.Select):
+        if select.args.get("group"):
+            continue
+        exprs = select.expressions
+        if len(exprs) == 1:
+            target = exprs[0].this if isinstance(exprs[0], exp.Alias) else exprs[0]
+            if isinstance(target, exp.Count) and isinstance(target.this, exp.Star):
+                result.has_count_star_for_existence = True
+                result.add_snippet("has_count_star_for_existence", target)
+                return
+
+
+# ---------------------------------------------------------------------------
+# A24: Possible UDF usage (functions sqlglot doesn't recognise)
+# ---------------------------------------------------------------------------
+def _check_possible_udf(node: exp.Expression, result: ParsedQuery) -> None:
+    for anon in node.find_all(exp.Anonymous):
+        name_lower = anon.name.lower()
+        if name_lower in _JSON_STRING_FUNCTIONS:
+            continue
+        if name_lower.startswith("udf") or "." in anon.name:
+            result.has_possible_udf = True
+            result.add_snippet("has_possible_udf", anon)
+            return
+
+
+# ---------------------------------------------------------------------------
+# A25: String-based JSON parsing instead of VARIANT
+# ---------------------------------------------------------------------------
+def _check_string_json_parsing(node: exp.Expression, result: ParsedQuery) -> None:
+    for func in node.find_all(exp.Func):
+        name_lower = type(func).__name__.lower()
+        if name_lower in ("fromjson",):
+            result.has_string_json_parsing = True
+            result.add_snippet("has_string_json_parsing", func)
+            return
+
+    for anon in node.find_all(exp.Anonymous):
+        if anon.name.lower() in _JSON_STRING_FUNCTIONS:
+            result.has_string_json_parsing = True
+            result.add_snippet("has_string_json_parsing", anon)
+            return
+
+    for anon in node.find_all(exp.Anonymous):
+        if anon.name.lower() in ("regexp_extract", "regexp_replace"):
+            args = anon.expressions
+            if len(args) >= 2:
+                pattern_arg = args[1]
+                if isinstance(pattern_arg, exp.Literal) and pattern_arg.is_string:
+                    pat = str(pattern_arg.this)
+                    if any(marker in pat for marker in ('"', '{', '}')):
+                        result.has_string_json_parsing = True
+                        result.add_snippet("has_string_json_parsing", anon)
+                        return
+
+
+# ---------------------------------------------------------------------------
+# Extract PARTITION BY columns from window functions (for E5 cross-correlator)
+# ---------------------------------------------------------------------------
+def _extract_window_partition_columns(node: exp.Expression, result: ParsedQuery) -> None:
+    for window in node.find_all(exp.Window):
+        partition_by = window.args.get("partition_by")
+        if partition_by:
+            for col in partition_by:
+                if isinstance(col, exp.Column):
+                    result.window_partition_columns.append(col.name)
 
 
 # ---------------------------------------------------------------------------
