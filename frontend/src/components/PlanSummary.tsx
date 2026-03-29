@@ -4,6 +4,7 @@ import type {
   PlanHighlight,
 } from "../types";
 import FullScreenModal, { ExpandButton } from "./FullScreenModal";
+import { RecommendationCard } from "./shared/recommendation";
 
 interface Props {
   plan: PlanSummaryType;
@@ -138,6 +139,7 @@ export default function PlanSummary({ plan }: Props) {
 
   const totalScans = plan.scans.reduce((sum, s) => sum + s.count, 0);
   const totalJoins = plan.join_types.length;
+  const recs = plan.recommendations ?? [];
 
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-5">
@@ -171,22 +173,19 @@ export default function PlanSummary({ plan }: Props) {
               `${totalScans} scan${totalScans !== 1 ? "s" : ""} (${plan.scans.length} unique)`,
             totalJoins > 0 &&
               `${totalJoins} join strateg${totalJoins !== 1 ? "ies" : "y"}`,
-            plan.warnings.length > 0 &&
-              `${plan.warnings.length} warning${plan.warnings.length !== 1 ? "s" : ""}`,
+            recs.length > 0 &&
+              `${recs.length} warning${recs.length !== 1 ? "s" : ""}`,
           ]
             .filter(Boolean)
             .join(" · ")}
         </p>
       )}
 
-      {plan.warnings.length > 0 && (
-        <div className="mb-3 bg-amber-50 border border-amber-200 rounded-lg p-3">
-          <h3 className="text-sm font-semibold mb-1.5 text-amber-800">Warnings</h3>
-          <ul className="list-disc pl-5 text-amber-700 text-sm space-y-0.5">
-            {plan.warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
+      {recs.length > 0 && (
+        <div className="flex flex-col gap-2 mb-3">
+          {recs.map((r, i) => (
+            <RecommendationCard key={i} recommendation={r} variant="compact" />
+          ))}
         </div>
       )}
 

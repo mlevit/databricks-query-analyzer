@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from datetime import datetime, timezone
 from typing import Any
 
 from databricks.sdk import WorkspaceClient
@@ -225,6 +226,16 @@ def fetch_query_history_via_api(statement_id: str) -> dict[str, Any] | None:
         "shuffle_read_bytes": None,
         "written_bytes": m.write_remote_bytes if m else None,
         "compute": {"warehouse_id": q.warehouse_id or q.endpoint_id},
+        "start_time": (
+            datetime.fromtimestamp(q.query_start_time_ms / 1000, tz=timezone.utc).isoformat()
+            if getattr(q, "query_start_time_ms", None)
+            else None
+        ),
+        "end_time": (
+            datetime.fromtimestamp(q.query_end_time_ms / 1000, tz=timezone.utc).isoformat()
+            if getattr(q, "query_end_time_ms", None)
+            else None
+        ),
     }
 
 
@@ -237,7 +248,10 @@ def get_warehouse_config(warehouse_id: str) -> dict[str, Any]:
         "name": wh.name,
         "warehouse_type": wh.warehouse_type.value if wh.warehouse_type else None,
         "cluster_size": wh.cluster_size,
+        "min_num_clusters": wh.min_num_clusters,
+        "max_num_clusters": wh.max_num_clusters,
         "num_clusters": wh.num_clusters,
+        "auto_stop_mins": wh.auto_stop_mins,
         "enable_photon": wh.enable_photon,
         "enable_serverless_compute": wh.enable_serverless_compute,
         "spot_instance_policy": (
@@ -245,3 +259,94 @@ def get_warehouse_config(warehouse_id: str) -> dict[str, Any]:
         ),
         "channel": wh.channel.name.value if wh.channel and wh.channel.name else None,
     }
+
+
+def fetch_concurrent_queries(
+    warehouse_id: str,
+    statement_id: str,
+    start_time: str,
+    end_time: str,
+) -> dict[str, int]:
+    """Count queries on the same warehouse that overlapped with the given time window."""
+    safe_wid = warehouse_id.replace("'", "''")
+    safe_sid = statement_id.replace("'", "''")
+    safe_start = start_time.replace("'", "''")
+    safe_end = end_time.replace("'", "''")
+
+    sql = (
+        "SELECT "
+        "  COUNT(*) AS total_queries, "
+        "  COUNT(CASE WHEN waiting_at_capacity_duration_ms > 0 THEN 1 END) AS queued_queries "
+        "FROM system.query.history "
+        f"WHERE compute.warehouse_id = '{safe_wid}' "
+        f"  AND start_time < '{safe_end}' "
+        f"  AND end_time > '{safe_start}' "
+        f"  AND statement_id != '{safe_sid}'"
+    )
+    rows = execute_sql(sql)
+    if rows:
+        return {
+            "total_queries": int(rows[0].get("total_queries", 0)),
+            "queued_queries": int(rows[0].get("queued_queries", 0)),
+        }
+    return {"total_queries": 0, "queued_queries": 0}
+
+
+def fetch_query_load_timeline(
+    warehouse_id: str,
+    start_time: str,
+    end_time: str,
+) -> list[dict[str, Any]]:
+    """Return per-minute count of running queries on the warehouse during the window."""
+    safe_wid = warehouse_id.replace("'", "''")
+    safe_start = start_time.replace("'", "''")
+    safe_end = end_time.replace("'", "''")
+
+    sql = (
+        "WITH buckets AS ("
+        "  SELECT EXPLODE(SEQUENCE("
+        f"    DATE_TRUNC('minute', TIMESTAMP '{safe_start}'),"
+        f"    TIMESTAMP '{safe_end}',"
+        "    INTERVAL 1 MINUTE"
+        "  )) AS bucket_start"
+        "), "
+        "queries AS ("
+        "  SELECT start_time AS q_start, end_time AS q_end, "
+        "    COALESCE(waiting_at_capacity_duration_ms, 0) AS wait_ms "
+        "  FROM system.query.history "
+        f"  WHERE compute.warehouse_id = '{safe_wid}' "
+        f"    AND start_time < TIMESTAMPADD(MINUTE, 1, TIMESTAMP '{safe_end}') "
+        f"    AND end_time > TIMESTAMP '{safe_start}'"
+        ") "
+        "SELECT b.bucket_start AS bucket_time, "
+        "  COUNT(q.q_start) AS running_count, "
+        "  COUNT(CASE WHEN q.wait_ms > 0 THEN 1 END) AS queued_count "
+        "FROM buckets b "
+        "LEFT JOIN queries q "
+        "  ON q.q_start < TIMESTAMPADD(MINUTE, 1, b.bucket_start) "
+        "  AND q.q_end > b.bucket_start "
+        "GROUP BY b.bucket_start "
+        "ORDER BY b.bucket_start"
+    )
+    return execute_sql(sql)
+
+
+def fetch_scaling_events(
+    warehouse_id: str,
+    start_time: str,
+    end_time: str,
+) -> list[dict[str, Any]]:
+    """Fetch warehouse scaling events around the given time window (+-5 min buffer)."""
+    safe_wid = warehouse_id.replace("'", "''")
+    safe_start = start_time.replace("'", "''")
+    safe_end = end_time.replace("'", "''")
+
+    sql = (
+        "SELECT event_time, event_type, cluster_count "
+        "FROM system.compute.warehouse_events "
+        f"WHERE warehouse_id = '{safe_wid}' "
+        f"  AND event_time BETWEEN TIMESTAMPADD(MINUTE, -5, TIMESTAMP '{safe_start}') "
+        f"      AND TIMESTAMPADD(MINUTE, 5, TIMESTAMP '{safe_end}') "
+        "ORDER BY event_time"
+    )
+    return execute_sql(sql)

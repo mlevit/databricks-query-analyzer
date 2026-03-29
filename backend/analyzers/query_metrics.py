@@ -66,6 +66,8 @@ def build_query_metrics(row: dict[str, Any]) -> QueryMetrics:
         shuffle_read_bytes=_int("shuffle_read_bytes"),
         written_bytes=_int("written_bytes"),
         warehouse_id=warehouse_id,
+        start_time=str(row["start_time"]) if row.get("start_time") else None,
+        end_time=str(row["end_time"]) if row.get("end_time") else None,
     )
 
 

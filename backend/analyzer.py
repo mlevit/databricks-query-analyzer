@@ -109,21 +109,30 @@ def run_analysis(
     progress(4, STEPS[4], "running")
     plan_summary = _try_explain(metrics.statement_text)
     if plan_summary:
-        for w in plan_summary.warnings:
-            all_recs.append(Recommendation(
+        plan_recs = [
+            Recommendation(
                 severity=Severity.WARNING,
                 category=Category.EXECUTION,
                 title="Execution plan warning",
                 description=w,
                 impact=_plan_warning_impact(w),
-            ))
+            )
+            for w in plan_summary.warnings
+        ]
+        plan_summary = plan_summary.model_copy(update={"recommendations": plan_recs})
+        all_recs.extend(plan_summary.recommendations)
     progress(4, STEPS[4], "done")
 
     # Step 6 — Warehouse analysis
     progress(5, STEPS[5], "running")
     warehouse_info = None
     if metrics.warehouse_id:
-        warehouse_info = analyze_warehouse(metrics.warehouse_id)
+        warehouse_info = analyze_warehouse(
+            metrics.warehouse_id,
+            statement_id=metrics.statement_id,
+            start_time=metrics.start_time,
+            end_time=metrics.end_time,
+        )
         all_recs.extend(warehouse_info.recommendations)
     progress(5, STEPS[5], "done")
 

@@ -36,6 +36,8 @@ export interface QueryMetrics {
   shuffle_read_bytes: number | null;
   written_bytes: number | null;
   warehouse_id: string | null;
+  start_time: string | null;
+  end_time: string | null;
 }
 
 export interface TableInfo {
@@ -71,7 +73,31 @@ export interface PlanSummary {
   has_filter_pushdown: boolean;
   has_partition_pruning: boolean;
   warnings: string[];
+  recommendations: Recommendation[];
   highlights: PlanHighlight[];
+}
+
+export interface ScalingEvent {
+  event_time: string;
+  event_type: string;
+  cluster_count: number;
+}
+
+export interface QueryLoadPoint {
+  time: string;
+  running: number;
+  queued: number;
+}
+
+export interface WarehouseActivity {
+  time_window_start: string;
+  time_window_end: string;
+  concurrent_query_count: number;
+  queued_query_count: number;
+  total_queries_in_window: number;
+  active_cluster_count: number | null;
+  scaling_events: ScalingEvent[];
+  query_load: QueryLoadPoint[];
 }
 
 export interface WarehouseInfo {
@@ -79,10 +105,15 @@ export interface WarehouseInfo {
   name: string | null;
   warehouse_type: string | null;
   cluster_size: string | null;
+  min_num_clusters: number | null;
+  max_num_clusters: number | null;
   num_clusters: number | null;
+  auto_stop_mins: number | null;
   enable_photon: boolean | null;
+  enable_serverless_compute: boolean | null;
   spot_instance_policy: string | null;
   channel: string | null;
+  activity: WarehouseActivity | null;
   recommendations: Recommendation[];
 }
 

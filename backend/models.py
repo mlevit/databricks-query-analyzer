@@ -61,6 +61,8 @@ class QueryMetrics(BaseModel):
     shuffle_read_bytes: Optional[int] = None
     written_bytes: Optional[int] = None
     warehouse_id: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
 
 
 class ColumnInfo(BaseModel):
@@ -103,7 +105,31 @@ class PlanSummary(BaseModel):
     has_filter_pushdown: bool = False
     has_partition_pruning: bool = False
     warnings: list[str] = Field(default_factory=list)
+    recommendations: list[Recommendation] = Field(default_factory=list)
     highlights: list[PlanHighlight] = Field(default_factory=list)
+
+
+class ScalingEvent(BaseModel):
+    event_time: str
+    event_type: str
+    cluster_count: int
+
+
+class QueryLoadPoint(BaseModel):
+    time: str
+    running: int
+    queued: int
+
+
+class WarehouseActivity(BaseModel):
+    time_window_start: str
+    time_window_end: str
+    concurrent_query_count: int
+    queued_query_count: int
+    total_queries_in_window: int
+    active_cluster_count: Optional[int] = None
+    scaling_events: list[ScalingEvent] = Field(default_factory=list)
+    query_load: list[QueryLoadPoint] = Field(default_factory=list)
 
 
 class WarehouseInfo(BaseModel):
@@ -111,10 +137,15 @@ class WarehouseInfo(BaseModel):
     name: Optional[str] = None
     warehouse_type: Optional[str] = None
     cluster_size: Optional[str] = None
+    min_num_clusters: Optional[int] = None
+    max_num_clusters: Optional[int] = None
     num_clusters: Optional[int] = None
+    auto_stop_mins: Optional[int] = None
     enable_photon: Optional[bool] = None
+    enable_serverless_compute: Optional[bool] = None
     spot_instance_policy: Optional[str] = None
     channel: Optional[str] = None
+    activity: Optional[WarehouseActivity] = None
     recommendations: list[Recommendation] = Field(default_factory=list)
 
 
