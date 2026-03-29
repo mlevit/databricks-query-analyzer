@@ -125,3 +125,129 @@ export interface BenchmarkResult {
   original: QueryBenchmarkStats;
   suggested: QueryBenchmarkStats;
 }
+
+// ---------------------------------------------------------------------------
+// v2: Scan / batch analysis
+// ---------------------------------------------------------------------------
+
+export interface ScanFilter {
+  warehouse_id?: string;
+  user_name?: string;
+  start_time?: string;
+  end_time?: string;
+  table_name?: string;
+  min_duration_ms?: number;
+  max_results?: number;
+}
+
+export interface QuerySummary {
+  statement_id: string;
+  statement_text: string;
+  execution_status: string;
+  total_duration_ms: number | null;
+  user_name: string | null;
+  warehouse_id: string | null;
+  health_score: number;
+  recommendation_count: number;
+  critical_count: number;
+  warning_count: number;
+  info_count: number;
+  top_recommendations: string[];
+}
+
+export interface WorkloadPattern {
+  pattern_type: string;
+  title: string;
+  description: string;
+  severity: Severity;
+  affected_queries: number;
+  affected_tables: string[];
+  impact: number;
+}
+
+export interface ScanResult {
+  filters: ScanFilter;
+  queries: QuerySummary[];
+  patterns: WorkloadPattern[];
+  total_queries_scanned: number;
+  total_duration_ms: number;
+  scanned_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// v2: Health & trending
+// ---------------------------------------------------------------------------
+
+export interface HealthScore {
+  score: number;
+  breakdown: Record<string, number>;
+}
+
+export interface AnalysisRecord {
+  statement_id: string;
+  analyzed_at: string;
+  health_score: number;
+  recommendation_count: number;
+  critical_count: number;
+  warning_count: number;
+  info_count: number;
+  total_duration_ms: number | null;
+  statement_text: string;
+}
+
+export interface TrendPoint {
+  analyzed_at: string;
+  health_score: number;
+  recommendation_count: number;
+}
+
+// ---------------------------------------------------------------------------
+// v2: Annotations
+// ---------------------------------------------------------------------------
+
+export type AnnotationStatus = "acknowledged" | "in_progress" | "wont_fix";
+
+export interface RecommendationAnnotation {
+  id: string;
+  statement_id: string;
+  recommendation_title: string;
+  status: AnnotationStatus;
+  note: string | null;
+  created_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// v2: Table health
+// ---------------------------------------------------------------------------
+
+export interface TableHealthScanFilter {
+  catalog: string;
+  schema_name: string;
+  table_name_pattern?: string;
+  max_results?: number;
+}
+
+export interface TableHealthResult {
+  tables: TableInfo[];
+  total_scanned: number;
+  scanned_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// v2: Warehouse fleet
+// ---------------------------------------------------------------------------
+
+export interface WarehouseFleetResult {
+  warehouses: WarehouseInfo[];
+  scanned_at: string;
+}
+
+// ---------------------------------------------------------------------------
+// v2: Raw SQL analysis
+// ---------------------------------------------------------------------------
+
+export interface RawSQLResult {
+  recommendations: Recommendation[];
+  health_score: number;
+  tables_referenced: string[];
+}

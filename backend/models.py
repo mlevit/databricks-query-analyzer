@@ -156,3 +156,148 @@ class QueryBenchmarkStats(BaseModel):
 class BenchmarkResult(BaseModel):
     original: QueryBenchmarkStats
     suggested: QueryBenchmarkStats
+
+
+# ---------------------------------------------------------------------------
+# v2: Scan / batch analysis models
+# ---------------------------------------------------------------------------
+
+class ScanFilter(BaseModel):
+    warehouse_id: Optional[str] = None
+    user_name: Optional[str] = None
+    start_time: Optional[str] = None
+    end_time: Optional[str] = None
+    table_name: Optional[str] = None
+    min_duration_ms: Optional[int] = None
+    max_results: int = Field(default=50, ge=1, le=200)
+
+
+class QuerySummary(BaseModel):
+    statement_id: str
+    statement_text: str
+    execution_status: str
+    total_duration_ms: Optional[int] = None
+    user_name: Optional[str] = None
+    warehouse_id: Optional[str] = None
+    health_score: int = Field(default=100, ge=0, le=100)
+    recommendation_count: int = 0
+    critical_count: int = 0
+    warning_count: int = 0
+    info_count: int = 0
+    top_recommendations: list[str] = Field(default_factory=list)
+
+
+class WorkloadPattern(BaseModel):
+    pattern_type: str
+    title: str
+    description: str
+    severity: Severity
+    affected_queries: int = 0
+    affected_tables: list[str] = Field(default_factory=list)
+    impact: int = Field(default=5, ge=1, le=10)
+
+
+class ScanResult(BaseModel):
+    filters: ScanFilter
+    queries: list[QuerySummary] = Field(default_factory=list)
+    patterns: list[WorkloadPattern] = Field(default_factory=list)
+    total_queries_scanned: int = 0
+    total_duration_ms: int = 0
+    scanned_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# v2: Health score
+# ---------------------------------------------------------------------------
+
+class HealthScore(BaseModel):
+    score: int = Field(default=100, ge=0, le=100)
+    breakdown: dict[str, int] = Field(default_factory=dict)
+
+
+# ---------------------------------------------------------------------------
+# v2: Persistence / history models
+# ---------------------------------------------------------------------------
+
+class AnalysisRecord(BaseModel):
+    statement_id: str
+    analyzed_at: str
+    health_score: int = 100
+    recommendation_count: int = 0
+    critical_count: int = 0
+    warning_count: int = 0
+    info_count: int = 0
+    total_duration_ms: Optional[int] = None
+    statement_text: str = ""
+    result_json: Optional[str] = None
+
+
+class TrendPoint(BaseModel):
+    analyzed_at: str
+    health_score: int
+    recommendation_count: int
+
+
+class AnnotationStatus(str, Enum):
+    ACKNOWLEDGED = "acknowledged"
+    IN_PROGRESS = "in_progress"
+    WONT_FIX = "wont_fix"
+
+
+class RecommendationAnnotation(BaseModel):
+    id: str
+    statement_id: str
+    recommendation_title: str
+    status: AnnotationStatus
+    note: Optional[str] = None
+    created_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# v2: Table health scanner
+# ---------------------------------------------------------------------------
+
+class TableHealthScanFilter(BaseModel):
+    catalog: str
+    schema_name: str
+    table_name_pattern: Optional[str] = None
+    max_results: int = Field(default=100, ge=1, le=500)
+
+
+class TableHealthResult(BaseModel):
+    tables: list[TableInfo] = Field(default_factory=list)
+    total_scanned: int = 0
+    scanned_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# v2: Warehouse fleet
+# ---------------------------------------------------------------------------
+
+class WarehouseFleetResult(BaseModel):
+    warehouses: list[WarehouseInfo] = Field(default_factory=list)
+    scanned_at: str = ""
+
+
+# ---------------------------------------------------------------------------
+# v2: Raw SQL analysis (no statement_id)
+# ---------------------------------------------------------------------------
+
+class RawSQLRequest(BaseModel):
+    sql: str
+    warehouse_id: Optional[str] = None
+
+
+class RawSQLResult(BaseModel):
+    recommendations: list[Recommendation] = Field(default_factory=list)
+    health_score: int = 100
+    tables_referenced: list[str] = Field(default_factory=list)
+
+
+# ---------------------------------------------------------------------------
+# v2: Export
+# ---------------------------------------------------------------------------
+
+class ExportRequest(BaseModel):
+    statement_id: str
+    format: str = Field(default="markdown", pattern="^(markdown|html|json)$")

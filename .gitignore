@@ -34,5 +34,13 @@ Thumbs.db
 # Logs
 *.log
 
+# Storage
+*.db
+.dqa_history.db
+
+# Test artifacts
+test-results/
+playwright-report/
+
 # Package lock (optional — remove if you want to pin)
 package-lock.json

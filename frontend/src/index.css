@@ -4,6 +4,8 @@
 @plugin "flowbite/plugin";
 @source "../../node_modules/flowbite";
 
+@custom-variant dark (&:where(.dark, .dark *));
+
 @layer base {
   body {
     font-family: 'Inter', system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;

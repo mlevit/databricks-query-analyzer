@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from datetime import datetime, timezone
 from typing import Any, Callable
 
 from backend.analyzers.plan_analyzer import analyze_plan
@@ -15,13 +17,18 @@ from backend.analyzers.sql_parser import (
 )
 from backend.analyzers.table_analyzer import analyze_tables
 from backend.analyzers.warehouse_analyzer import analyze_warehouse
-from backend.db import execute_sql, fetch_query_history_via_api
+from backend.analyzers.workload_analyzer import analyze_workload
+from backend.db import execute_sql, fetch_query_history_via_api, scan_query_history
 from backend.models import (
     AnalysisResult,
     Category,
+    HealthScore,
     PlanSummary,
     QueryMetrics,
+    QuerySummary,
     Recommendation,
+    ScanFilter,
+    ScanResult,
     Severity,
     TableInfo,
 )
@@ -408,6 +415,135 @@ def _fetch_query_history(statement_id: str) -> dict[str, Any]:
         return row
 
     raise ValueError(f"No query found for statement_id: {statement_id}")
+
+
+# ---------------------------------------------------------------------------
+# Health score computation
+# ---------------------------------------------------------------------------
+
+_SEVERITY_WEIGHTS = {Severity.CRITICAL: 3, Severity.WARNING: 2, Severity.INFO: 1}
+_MAX_IMPACT = 10
+
+
+def compute_health_score(recommendations: list[Recommendation]) -> HealthScore:
+    """Compute a 0-100 health score from recommendation severity and impact."""
+    if not recommendations:
+        return HealthScore(score=100, breakdown={})
+
+    max_possible = _MAX_IMPACT * _SEVERITY_WEIGHTS[Severity.CRITICAL] * 10
+    total_penalty = sum(
+        r.impact * _SEVERITY_WEIGHTS.get(r.severity, 1) for r in recommendations
+    )
+    score = max(0, round(100 - (total_penalty / max_possible) * 100))
+
+    breakdown = {}
+    for r in recommendations:
+        key = r.severity.value
+        breakdown[key] = breakdown.get(key, 0) + 1
+
+    return HealthScore(score=score, breakdown=breakdown)
+
+
+# ---------------------------------------------------------------------------
+# Batch / scan analysis
+# ---------------------------------------------------------------------------
+
+def run_batch_analysis(
+    scan_filter: ScanFilter,
+    on_progress: ProgressCallback | None = None,
+) -> ScanResult:
+    """Scan query history and run analysis on each matched query."""
+    progress = on_progress or _noop_progress
+
+    progress(0, "Scanning query history", "running")
+    rows = scan_query_history(
+        warehouse_id=scan_filter.warehouse_id,
+        user_name=scan_filter.user_name,
+        start_time=scan_filter.start_time,
+        end_time=scan_filter.end_time,
+        table_name=scan_filter.table_name,
+        min_duration_ms=scan_filter.min_duration_ms,
+        max_results=scan_filter.max_results,
+    )
+    progress(0, "Scanning query history", "done")
+
+    summaries: list[QuerySummary] = []
+    analysis_results: list[AnalysisResult] = []
+    total_duration = 0
+
+    progress(1, f"Analyzing {len(rows)} queries", "running")
+
+    def _analyze_one(row: dict[str, Any]) -> tuple[QuerySummary | None, AnalysisResult | None]:
+        try:
+            sid = row.get("statement_id", "")
+            if not sid:
+                return None, None
+            result = run_analysis(sid)
+            hs = compute_health_score(result.recommendations)
+            recs = result.recommendations
+            top_titles = [r.title for r in recs[:3]]
+            summary = QuerySummary(
+                statement_id=sid,
+                statement_text=(result.query_metrics.statement_text or "")[:200],
+                execution_status=result.query_metrics.execution_status,
+                total_duration_ms=result.query_metrics.total_duration_ms,
+                user_name=row.get("executed_by"),
+                warehouse_id=result.query_metrics.warehouse_id,
+                health_score=hs.score,
+                recommendation_count=len(recs),
+                critical_count=sum(1 for r in recs if r.severity == Severity.CRITICAL),
+                warning_count=sum(1 for r in recs if r.severity == Severity.WARNING),
+                info_count=sum(1 for r in recs if r.severity == Severity.INFO),
+                top_recommendations=top_titles,
+            )
+            return summary, result
+        except Exception:
+            logger.warning("Failed to analyze statement %s", row.get("statement_id"), exc_info=True)
+            return None, None
+
+    with ThreadPoolExecutor(max_workers=4) as pool:
+        futures = {pool.submit(_analyze_one, row): row for row in rows}
+        for future in as_completed(futures):
+            summary, result = future.result()
+            if summary:
+                summaries.append(summary)
+                total_duration += summary.total_duration_ms or 0
+            if result:
+                analysis_results.append(result)
+
+    progress(1, f"Analyzing {len(rows)} queries", "done")
+
+    progress(2, "Detecting workload patterns", "running")
+    patterns = analyze_workload(analysis_results)
+    progress(2, "Detecting workload patterns", "done")
+
+    summaries.sort(key=lambda s: (s.health_score, -(s.total_duration_ms or 0)))
+
+    return ScanResult(
+        filters=scan_filter,
+        queries=summaries,
+        patterns=patterns,
+        total_queries_scanned=len(rows),
+        total_duration_ms=total_duration,
+        scanned_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Raw SQL analysis (no statement_id, no metrics/plan/warehouse)
+# ---------------------------------------------------------------------------
+
+def run_sql_analysis(sql: str) -> tuple[list[Recommendation], list[str]]:
+    """Analyze raw SQL text and return recommendations + referenced tables."""
+    parsed = parse_query(sql)
+    recs = _sql_pattern_recommendations(parsed)
+
+    recs = _group_recommendations(recs)
+
+    severity_order = {Severity.CRITICAL: 0, Severity.WARNING: 1, Severity.INFO: 2}
+    recs.sort(key=lambda r: (-r.impact, severity_order.get(r.severity, 99)))
+
+    return recs, sorted(parsed.tables)
 
 
 _EXPLAINABLE_PREFIXES = ("SELECT", "WITH", "FROM", "TABLE", "VALUES")

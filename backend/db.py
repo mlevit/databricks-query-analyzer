@@ -228,6 +228,102 @@ def fetch_query_history_via_api(statement_id: str) -> dict[str, Any] | None:
     }
 
 
+def scan_query_history(
+    *,
+    warehouse_id: str | None = None,
+    user_name: str | None = None,
+    start_time: str | None = None,
+    end_time: str | None = None,
+    table_name: str | None = None,
+    min_duration_ms: int | None = None,
+    max_results: int = 50,
+) -> list[dict[str, Any]]:
+    """Scan system.query.history with filters and return matching rows."""
+    conditions = ["execution_status = 'FINISHED'"]
+
+    if warehouse_id:
+        safe_wid = warehouse_id.replace("'", "''")
+        conditions.append(f"compute.warehouse_id = '{safe_wid}'")
+    if user_name:
+        safe_user = user_name.replace("'", "''")
+        conditions.append(f"executed_by = '{safe_user}'")
+    if start_time:
+        safe_start = start_time.replace("'", "''")
+        conditions.append(f"end_time >= '{safe_start}'")
+    if end_time:
+        safe_end = end_time.replace("'", "''")
+        conditions.append(f"end_time <= '{safe_end}'")
+    if min_duration_ms is not None:
+        conditions.append(f"total_duration_ms >= {int(min_duration_ms)}")
+
+    where = " AND ".join(conditions)
+    order = "total_duration_ms DESC"
+
+    sql = (
+        f"SELECT * FROM system.query.history "
+        f"WHERE {where} "
+        f"ORDER BY {order} "
+        f"LIMIT {int(max_results)}"
+    )
+    logger.info("Scanning query history: %s", sql[:300])
+
+    try:
+        rows = execute_sql(sql)
+    except Exception as exc:
+        logger.warning("scan_query_history SQL failed: %s", exc)
+        rows = []
+
+    if table_name and rows:
+        safe_table = table_name.lower()
+        rows = [r for r in rows if safe_table in (r.get("statement_text") or "").lower()]
+
+    return rows
+
+
+def list_warehouses() -> list[dict[str, Any]]:
+    """List all SQL warehouses accessible to the current user."""
+    w = get_client()
+    result = []
+    for wh in w.warehouses.list():
+        result.append({
+            "warehouse_id": wh.id,
+            "name": wh.name,
+            "warehouse_type": wh.warehouse_type.value if wh.warehouse_type else None,
+            "cluster_size": wh.cluster_size,
+            "num_clusters": wh.num_clusters,
+            "enable_photon": wh.enable_photon,
+            "enable_serverless_compute": wh.enable_serverless_compute,
+            "spot_instance_policy": (
+                wh.spot_instance_policy.value if wh.spot_instance_policy else None
+            ),
+            "channel": wh.channel.name.value if wh.channel and wh.channel.name else None,
+        })
+    return result
+
+
+def list_tables_in_schema(
+    catalog: str, schema_name: str, *, table_name_pattern: str | None = None, max_results: int = 100
+) -> list[str]:
+    """List table names from information_schema."""
+    safe_catalog = catalog.replace("'", "''")
+    safe_schema = schema_name.replace("'", "''")
+
+    sql = (
+        f"SELECT table_catalog, table_schema, table_name "
+        f"FROM {safe_catalog}.information_schema.tables "
+        f"WHERE table_schema = '{safe_schema}' AND table_type = 'MANAGED' "
+    )
+    if table_name_pattern:
+        safe_pattern = table_name_pattern.replace("'", "''")
+        sql += f"AND table_name LIKE '{safe_pattern}' "
+    sql += f"LIMIT {int(max_results)}"
+
+    rows = execute_sql(sql)
+    return [
+        f"{r['table_catalog']}.{r['table_schema']}.{r['table_name']}" for r in rows
+    ]
+
+
 def get_warehouse_config(warehouse_id: str) -> dict[str, Any]:
     """Fetch warehouse configuration via the SDK."""
     w = get_client()
