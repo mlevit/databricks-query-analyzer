@@ -89,9 +89,16 @@ class PlanHighlight(BaseModel):
     reason: str = Field(description="Why this part of the plan is problematic")
 
 
+class ScanInfo(BaseModel):
+    operator: str = Field(description="Scan operator type, e.g. Scan, FileScan, PhotonScan")
+    format: str = Field(description="Data format, e.g. parquet, delta, orc")
+    table_name: Optional[str] = Field(default=None, description="Fully-qualified table name if extractable")
+    count: int = Field(default=1, description="Number of occurrences in the plan")
+
+
 class PlanSummary(BaseModel):
     raw_plan: str
-    scan_types: list[str] = Field(default_factory=list)
+    scans: list[ScanInfo] = Field(default_factory=list)
     join_types: list[str] = Field(default_factory=list)
     has_filter_pushdown: bool = False
     has_partition_pruning: bool = False

@@ -57,9 +57,16 @@ export interface PlanHighlight {
   reason: string;
 }
 
+export interface ScanInfo {
+  operator: string;
+  format: string;
+  table_name: string | null;
+  count: number;
+}
+
 export interface PlanSummary {
   raw_plan: string;
-  scan_types: string[];
+  scans: ScanInfo[];
   join_types: string[];
   has_filter_pushdown: boolean;
   has_partition_pruning: boolean;

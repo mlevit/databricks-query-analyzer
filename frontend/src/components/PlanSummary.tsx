@@ -136,6 +136,9 @@ export default function PlanSummary({ plan }: Props) {
   const [planFullScreen, setPlanFullScreen] = useState(false);
   const hasHighlights = plan.highlights && plan.highlights.length > 0;
 
+  const totalScans = plan.scans.reduce((sum, s) => sum + s.count, 0);
+  const totalJoins = plan.join_types.length;
+
   return (
     <div className="bg-white rounded-lg border border-gray-200 p-5">
       <h2 className="text-base font-semibold mb-3">Execution Plan</h2>
@@ -161,6 +164,32 @@ export default function PlanSummary({ plan }: Props) {
         )}
       </div>
 
+      {(totalScans > 0 || totalJoins > 0) && (
+        <p className="text-xs text-gray-500 mb-3">
+          {[
+            totalScans > 0 &&
+              `${totalScans} scan${totalScans !== 1 ? "s" : ""} (${plan.scans.length} unique)`,
+            totalJoins > 0 &&
+              `${totalJoins} join strateg${totalJoins !== 1 ? "ies" : "y"}`,
+            plan.warnings.length > 0 &&
+              `${plan.warnings.length} warning${plan.warnings.length !== 1 ? "s" : ""}`,
+          ]
+            .filter(Boolean)
+            .join(" · ")}
+        </p>
+      )}
+
+      {plan.warnings.length > 0 && (
+        <div className="mb-3 bg-amber-50 border border-amber-200 rounded-lg p-3">
+          <h3 className="text-sm font-semibold mb-1.5 text-amber-800">Warnings</h3>
+          <ul className="list-disc pl-5 text-amber-700 text-sm space-y-0.5">
+            {plan.warnings.map((w, i) => (
+              <li key={i}>{w}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
       {plan.join_types.length > 0 && (
         <div className="mb-2">
           <h3 className="text-sm font-semibold mt-3 mb-1.5">Join Strategies</h3>
@@ -177,30 +206,31 @@ export default function PlanSummary({ plan }: Props) {
         </div>
       )}
 
-      {plan.scan_types.length > 0 && (
+      {plan.scans.length > 0 && (
         <div className="mb-2">
           <h3 className="text-sm font-semibold mt-3 mb-1.5">Scans</h3>
           <div className="flex gap-1.5 flex-wrap">
-            {plan.scan_types.map((s, i) => (
+            {plan.scans.map((s) => (
               <span
-                key={i}
-                className="bg-gray-100 text-gray-600 text-xs font-medium px-2.5 py-0.5 rounded-full"
+                key={`${s.operator}-${s.format}-${s.table_name ?? ""}`}
+                className="bg-gray-100 text-gray-600 text-xs font-medium px-2.5 py-0.5 rounded-full inline-flex items-center gap-1"
               >
-                {s}
+                <span>
+                  {s.operator}: {s.format}
+                  {s.table_name && (
+                    <span className="text-gray-400 ml-0.5">
+                      ({s.table_name.split(".").pop()})
+                    </span>
+                  )}
+                </span>
+                {s.count > 1 && (
+                  <span className="bg-gray-200 text-gray-500 text-[0.65rem] font-semibold rounded-full px-1.5 py-px leading-none">
+                    ×{s.count}
+                  </span>
+                )}
               </span>
             ))}
           </div>
-        </div>
-      )}
-
-      {plan.warnings.length > 0 && (
-        <div className="mb-2">
-          <h3 className="text-sm font-semibold mt-3 mb-1.5">Warnings</h3>
-          <ul className="list-disc pl-5 text-amber-700 text-sm space-y-0.5">
-            {plan.warnings.map((w, i) => (
-              <li key={i}>{w}</li>
-            ))}
-          </ul>
         </div>
       )}
 

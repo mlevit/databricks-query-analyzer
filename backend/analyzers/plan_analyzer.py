@@ -3,14 +3,16 @@ from __future__ import annotations
 import logging
 import re
 
-from backend.models import PlanHighlight, PlanSummary, Severity
+from collections import Counter
+
+from backend.models import PlanHighlight, PlanSummary, ScanInfo, Severity
 
 logger = logging.getLogger(__name__)
 
 SCAN_PATTERNS = [
-    (re.compile(r"Scan\s+(\S+)", re.IGNORECASE), "Scan"),
-    (re.compile(r"FileScan\s+(\S+)", re.IGNORECASE), "FileScan"),
-    (re.compile(r"PhotonScan\s+(\S+)", re.IGNORECASE), "PhotonScan"),
+    (re.compile(r"(?<!File)(?<!Photon)Scan\s+(\S+)(?:\s+(\S+))?", re.IGNORECASE), "Scan"),
+    (re.compile(r"FileScan\s+(\S+)(?:\s+(\S+))?", re.IGNORECASE), "FileScan"),
+    (re.compile(r"PhotonScan\s+(\S+)(?:\s+(\S+))?", re.IGNORECASE), "PhotonScan"),
 ]
 
 JOIN_PATTERNS = [
@@ -113,8 +115,17 @@ def _add_highlight(
     ))
 
 
+def _extract_table_name(candidate: str | None) -> str | None:
+    """Return a cleaned table name if the candidate looks like one (contains a dot)."""
+    if not candidate:
+        return None
+    cleaned = candidate.strip("[](),")
+    if "." in cleaned and not cleaned.startswith("#"):
+        return cleaned
+    return None
+
+
 def analyze_plan(raw_plan: str) -> PlanSummary:
-    scan_types: list[str] = []
     join_types: list[str] = []
     warnings: list[str] = []
     highlights: list[PlanHighlight] = []
@@ -123,9 +134,17 @@ def analyze_plan(raw_plan: str) -> PlanSummary:
 
     line_starts = _offset_to_line(raw_plan)
 
+    scan_counter: Counter[tuple[str, str, str | None]] = Counter()
     for pattern, label in SCAN_PATTERNS:
         for match in pattern.finditer(raw_plan):
-            scan_types.append(f"{label}: {match.group(1)}")
+            fmt = match.group(1)
+            table_name = _extract_table_name(match.group(2))
+            scan_counter[(label, fmt, table_name)] += 1
+
+    scans = [
+        ScanInfo(operator=op, format=fmt, table_name=tbl, count=count)
+        for (op, fmt, tbl), count in scan_counter.items()
+    ]
 
     seen_joins: set[str] = set()
     for pattern in JOIN_PATTERNS:
@@ -195,7 +214,7 @@ def analyze_plan(raw_plan: str) -> PlanSummary:
 
     return PlanSummary(
         raw_plan=raw_plan,
-        scan_types=scan_types,
+        scans=scans,
         join_types=join_types,
         has_filter_pushdown=has_filter_pushdown,
         has_partition_pruning=has_partition_pruning,
