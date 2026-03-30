@@ -1,4 +1,4 @@
-# Databricks Query Performance Analyzer
+# Databricks SQL Architect
 
 A Databricks App that analyzes SQL query performance and provides actionable, Databricks-specific recommendations for optimization.
 

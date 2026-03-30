@@ -24,7 +24,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-app = FastAPI(title="Databricks Query Performance Analyzer")
+app = FastAPI(title="Databricks SQL Architect")
 
 # ---------------------------------------------------------------------------
 # Bounded TTL cache for analysis results
