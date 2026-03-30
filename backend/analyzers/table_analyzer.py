@@ -7,7 +7,7 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from typing import Any
 
 from backend.analyzers.sql_parser import ParsedQuery
-from backend.db import execute_sql
+from backend.db import execute_sql, get_client
 from backend.models import Category, ColumnInfo, Recommendation, Severity, TableInfo
 
 logger = logging.getLogger(__name__)
@@ -115,6 +115,34 @@ def fetch_table_columns(table_name: str) -> list[ColumnInfo]:
         return []
 
 
+def fetch_table_cbo_stats(table_name: str) -> dict[str, Any]:
+    """Fetch CBO statistics via the Unity Catalog Tables API.
+
+    The Tables API ``properties`` map contains ``spark.sql.statistics.*``
+    keys when ANALYZE TABLE has been run (manually or via AUTO_STATS).
+
+    Returns a dict with ``has_cbo_stats``, ``num_rows``, and ``total_size``.
+    """
+    empty: dict[str, Any] = {"has_cbo_stats": False, "num_rows": None, "total_size": None}
+    if not _is_safe_table_name(table_name):
+        return empty
+    try:
+        w = get_client()
+        table_info = w.tables.get(table_name)
+        props = table_info.properties or {}
+        num_rows_str = props.get("spark.sql.statistics.numRows")
+        total_size_str = props.get("spark.sql.statistics.totalSize")
+        has_stats = num_rows_str is not None or total_size_str is not None
+        return {
+            "has_cbo_stats": has_stats,
+            "num_rows": int(num_rows_str) if num_rows_str else None,
+            "total_size": int(total_size_str) if total_size_str else None,
+        }
+    except Exception as exc:
+        logger.warning("Failed to fetch catalog properties for %s: %s", table_name, exc)
+        return empty
+
+
 def analyze_tables(
     table_names: list[str],
     parsed_query: ParsedQuery,
@@ -124,8 +152,10 @@ def analyze_tables(
 
     details_map: dict[str, dict[str, Any] | None] = {}
     columns_map: dict[str, list[ColumnInfo]] = {}
+    cbo_stats_map: dict[str, dict[str, Any]] = {}
+    _empty_cbo: dict[str, Any] = {"has_cbo_stats": False, "num_rows": None, "total_size": None}
     if fetchable:
-        with ThreadPoolExecutor(max_workers=min(len(fetchable) * 2, 16)) as pool:
+        with ThreadPoolExecutor(max_workers=min(len(fetchable) * 3, 16)) as pool:
             detail_futures = {
                 pool.submit(fetch_table_detail, name): ("detail", name)
                 for name in fetchable
@@ -134,19 +164,27 @@ def analyze_tables(
                 pool.submit(fetch_table_columns, name): ("columns", name)
                 for name in fetchable
             }
-            all_futures = {**detail_futures, **column_futures}
+            cbo_futures = {
+                pool.submit(fetch_table_cbo_stats, name): ("cbo", name)
+                for name in fetchable
+            }
+            all_futures = {**detail_futures, **column_futures, **cbo_futures}
             for future in as_completed(all_futures):
                 kind, name = all_futures[future]
                 try:
                     if kind == "detail":
                         details_map[name] = future.result()
-                    else:
+                    elif kind == "columns":
                         columns_map[name] = future.result()
+                    else:
+                        cbo_stats_map[name] = future.result()
                 except Exception:
                     if kind == "detail":
                         details_map[name] = None
-                    else:
+                    elif kind == "columns":
                         columns_map[name] = []
+                    else:
+                        cbo_stats_map[name] = _empty_cbo
 
     results: list[TableInfo] = []
     for name in table_names:
@@ -172,6 +210,7 @@ def analyze_tables(
                 props = {}
 
         columns = columns_map.get(name, [])
+        cbo = cbo_stats_map.get(name, _empty_cbo)
 
         recs = _analyze_single_table(
             name, clustering, partitions, num_files, size_bytes,
@@ -179,6 +218,7 @@ def analyze_tables(
             parsed_query,
             table_format=table_format,
             columns=columns,
+            has_cbo_stats=cbo["has_cbo_stats"],
         )
 
         results.append(TableInfo(
@@ -191,6 +231,9 @@ def analyze_tables(
             column_count=len(columns) if columns else None,
             columns=columns,
             properties=props if isinstance(props, dict) else {},
+            has_cbo_stats=cbo["has_cbo_stats"],
+            stats_num_rows=cbo["num_rows"],
+            stats_total_size=cbo["total_size"],
             recommendations=recs,
         ))
 
@@ -213,6 +256,7 @@ def _analyze_single_table(
     *,
     table_format: str | None = None,
     columns: list[ColumnInfo] | None = None,
+    has_cbo_stats: bool = False,
 ) -> list[Recommendation]:
     recs: list[Recommendation] = []
 
@@ -281,7 +325,7 @@ def _analyze_single_table(
         ))
 
     # D1: Table statistics staleness
-    _check_stats_staleness(table_name, properties, recs)
+    _check_stats_staleness(table_name, has_cbo_stats, recs)
 
     # D2: Over-partitioned tables
     _check_over_partitioned(table_name, partitions, num_files, size_bytes, recs)
@@ -352,24 +396,22 @@ def _analyze_single_table(
 
 def _check_stats_staleness(
     table_name: str,
-    properties: dict[str, str],
+    has_cbo_stats: bool,
     recs: list[Recommendation],
 ) -> None:
-    """D1: Recommend ANALYZE TABLE if statistics appear missing."""
-    stats_keys = {
-        "spark.sql.statistics.totalSize",
-        "spark.sql.statistics.numRows",
-        "delta.stats.numRecords",
-    }
-    has_stats = any(k in properties for k in stats_keys)
+    """D1: Recommend ANALYZE TABLE if CBO statistics are missing.
 
-    if not has_stats:
+    Uses the Unity Catalog Tables API to check whether ``spark.sql.statistics.*``
+    properties exist.  When row-level stats are absent the cost-based optimizer
+    cannot make informed join-ordering or broadcast decisions.
+    """
+    if not has_cbo_stats:
         recs.append(Recommendation(
             severity=Severity.INFO,
             category=Category.TABLE,
             title="Table statistics may be stale",
             description=(
-                "No row/size statistics found in table properties. "
+                "No row-level CBO statistics found for this table. "
                 "The query optimizer relies on accurate statistics for cost-based "
                 "decisions like join ordering and broadcast thresholds."
             ),

@@ -1,5 +1,5 @@
 import React, { useCallback, useState } from "react";
-import { benchmarkQueries, rewriteQuery } from "../api";
+import { type BenchmarkProgress, benchmarkQueriesPoll, cancelBenchmarkQuery, rewriteQuery } from "../api";
 import type { AIRewriteResult, BenchmarkResult, QueryBenchmarkStats } from "../types";
 
 interface Props {
@@ -337,6 +337,103 @@ function buildMetricRows(
   })).filter((s) => s.rows.length > 0);
 }
 
+function BenchmarkProgressPanel({ progress, onCancel }: {
+  progress: Record<string, BenchmarkProgress>;
+  onCancel: (phase: "original" | "suggested") => void;
+}) {
+  const phases: { key: "original" | "suggested"; label: string }[] = [
+    { key: "original", label: "Original query" },
+    { key: "suggested", label: "Suggested query" },
+  ];
+
+  return (
+    <div className="mt-4 border border-gray-200 rounded-lg overflow-hidden bg-gray-50/50">
+      <div className="px-4 py-2.5 border-b border-gray-200 bg-gray-50">
+        <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wider">Benchmark Progress</h3>
+      </div>
+      <div className="divide-y divide-gray-100">
+        {phases.map(({ key, label }) => {
+          const p = progress[key];
+          const isDone = p?.state === "DONE";
+          const isCanceled = p?.state === "CANCELED";
+          const isTerminal = isDone || isCanceled;
+          const isActive = p && !isTerminal;
+          const isWaiting = !p;
+          const canCancel = isActive && p?.statement_id;
+
+          return (
+            <div key={key} className="flex items-center gap-3 px-4 py-3">
+              <div className="shrink-0">
+                {isDone ? (
+                  <svg className="h-5 w-5 text-green-500" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zm3.707-9.293a1 1 0 00-1.414-1.414L9 10.586 7.707 9.293a1 1 0 00-1.414 1.414l2 2a1 1 0 001.414 0l4-4z" clipRule="evenodd" />
+                  </svg>
+                ) : isCanceled ? (
+                  <svg className="h-5 w-5 text-red-400" viewBox="0 0 20 20" fill="currentColor" aria-hidden="true">
+                    <path fillRule="evenodd" d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z" clipRule="evenodd" />
+                  </svg>
+                ) : isActive ? (
+                  <svg className="animate-spin h-5 w-5 text-green-600" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                ) : (
+                  <div className="h-5 w-5 rounded-full border-2 border-gray-300" />
+                )}
+              </div>
+              <div className="flex-1 min-w-0">
+                <div className="flex items-center gap-2">
+                  <span className={`text-sm font-medium ${isWaiting ? "text-gray-400" : "text-gray-900"}`}>
+                    {label}
+                  </span>
+                  {p?.state && !isWaiting && (
+                    <span className={`text-xs px-1.5 py-0.5 rounded font-mono ${
+                      isDone
+                        ? "bg-green-100 text-green-700"
+                        : isCanceled
+                          ? "bg-red-100 text-red-700"
+                          : p.state === "FETCHING_METRICS"
+                            ? "bg-blue-100 text-blue-700"
+                            : "bg-amber-100 text-amber-700"
+                    }`}>
+                      {p.state === "FETCHING_METRICS" ? "FETCHING METRICS" : p.state}
+                    </span>
+                  )}
+                  {isWaiting && (
+                    <span className="text-xs text-gray-400 italic">waiting</span>
+                  )}
+                </div>
+                {p?.statement_id && (
+                  <p className="text-xs text-gray-400 font-mono mt-0.5 truncate">
+                    {p.statement_id}
+                  </p>
+                )}
+              </div>
+              {p?.elapsed_ms != null && !isWaiting && (
+                <span className="text-sm font-mono text-gray-500 shrink-0 tabular-nums">
+                  {formatMs(p.elapsed_ms)}
+                </span>
+              )}
+              {canCancel && (
+                <button
+                  className="shrink-0 inline-flex items-center gap-1 px-2 py-1 text-xs font-medium text-red-600 bg-red-50 border border-red-200 rounded hover:bg-red-100 transition-colors cursor-pointer"
+                  onClick={() => onCancel(key)}
+                  title={`Cancel ${label.toLowerCase()}`}
+                >
+                  <svg className="h-3.5 w-3.5" viewBox="0 0 16 16" fill="currentColor" aria-hidden="true">
+                    <rect x="3" y="3" width="10" height="10" rx="1.5" />
+                  </svg>
+                  Stop
+                </button>
+              )}
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 function BenchmarkDisplay({ benchmark }: { benchmark: BenchmarkResult }) {
   const { original, suggested } = benchmark;
 
@@ -423,6 +520,8 @@ export default function AIRewrite({ statementId, warehouseId }: Props) {
   const [benchmark, setBenchmark] = useState<BenchmarkResult | null>(null);
   const [benchLoading, setBenchLoading] = useState(false);
   const [benchError, setBenchError] = useState<string | null>(null);
+  const [benchProgress, setBenchProgress] = useState<Record<string, BenchmarkProgress>>({});
+  const [benchmarkId, setBenchmarkId] = useState<string | null>(null);
   const [customInstruction, setCustomInstruction] = useState("");
 
   const handleRewrite = async () => {
@@ -445,13 +544,28 @@ export default function AIRewrite({ statementId, warehouseId }: Props) {
     if (!result) return;
     setBenchLoading(true);
     setBenchError(null);
+    setBenchProgress({});
+    setBenchmarkId(null);
+    await benchmarkQueriesPoll(
+      result.original_sql,
+      result.suggested_sql,
+      warehouseId,
+      {
+        onStarted: (id) => setBenchmarkId(id),
+        onProgress: (progress) => setBenchProgress(progress),
+        onResult: (data) => setBenchmark(data),
+        onError: (message) => setBenchError(message),
+      },
+    );
+    setBenchLoading(false);
+  };
+
+  const handleCancelQuery = async (phase: "original" | "suggested") => {
+    if (!benchmarkId) return;
     try {
-      const data = await benchmarkQueries(result.original_sql, result.suggested_sql, warehouseId);
-      setBenchmark(data);
-    } catch (err: unknown) {
-      setBenchError(err instanceof Error ? err.message : "Benchmark failed");
-    } finally {
-      setBenchLoading(false);
+      await cancelBenchmarkQuery(benchmarkId, phase);
+    } catch {
+      // cancellation is best-effort
     }
   };
 
@@ -599,6 +713,10 @@ export default function AIRewrite({ statementId, warehouseId }: Props) {
               )}
             </button>
           </div>
+
+          {benchLoading && Object.keys(benchProgress).length > 0 && (
+            <BenchmarkProgressPanel progress={benchProgress} onCancel={handleCancelQuery} />
+          )}
 
           {benchError && (
             <p className="text-red-700 mt-3 text-sm" role="alert">{benchError}</p>

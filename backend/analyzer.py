@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any, Callable
 
 from backend.analyzers.plan_analyzer import analyze_plan
@@ -70,6 +71,173 @@ def _plan_warning_impact(description: str) -> int:
     return 5
 
 
+def _plan_warning_to_recommendation(
+    warning: str,
+    parsed: ParsedQuery,
+    tables: list[TableInfo],
+) -> Recommendation:
+    """Convert a plan warning string into a Recommendation with actionable fix guidance."""
+
+    action: str | None = None
+    snippet: str | None = None
+    affected_tables: list[str] = []
+    per_table_actions: dict[str, str] = {}
+
+    query_tables = parsed.tables
+
+    def _first_snippet(key: str) -> str | None:
+        snippets = parsed.snippets.get(key)
+        return snippets[0] if snippets else None
+
+    # ------------------------------------------------------------------
+    # Full scan without filter pushdown
+    # ------------------------------------------------------------------
+    if "Full scan without filter pushdown" in warning:
+        affected_tables = list(query_tables)
+
+        if parsed.missing_where:
+            action = (
+                "This query has no WHERE clause, so no predicates can be pushed "
+                "down to the scan layer. Add a WHERE filter to reduce the amount "
+                "of data read at the source."
+            )
+        elif parsed.has_function_on_filter_column:
+            action = (
+                "A function wraps a column in the WHERE clause, which prevents "
+                "predicate pushdown. Rewrite the filter to keep the column bare.\n"
+                "Example: replace YEAR(date_col) = 2024 with\n"
+                "date_col >= '2024-01-01' AND date_col < '2025-01-01'"
+            )
+            snippet = _first_snippet("has_function_on_filter_column")
+        else:
+            action = (
+                "Ensure WHERE predicates reference columns directly (not wrapped "
+                "in functions) and appear in the same query scope as the table "
+                "they filter. If using CTEs or subqueries, push filters into the "
+                "inner query closest to the table reference."
+            )
+
+    # ------------------------------------------------------------------
+    # Scan without partition pruning
+    # ------------------------------------------------------------------
+    elif "without partition pruning" in warning:
+        partitioned_tables = [
+            t for t in tables if t.partition_columns
+            and not t.full_name.lower().startswith("system.")
+        ]
+
+        if partitioned_tables:
+            affected_tables = [t.full_name for t in partitioned_tables]
+            details_parts = []
+            for t in partitioned_tables:
+                pcols = ", ".join(t.partition_columns)
+                details_parts.append(
+                    f"{t.full_name} is partitioned by ({pcols})"
+                )
+                per_table_actions[t.full_name] = (
+                    f"SELECT ... FROM {t.full_name}\n"
+                    f"WHERE {t.partition_columns[0]} = '<value>';"
+                )
+            action = (
+                "Add a WHERE filter on the partition column to enable partition "
+                f"pruning. {'; '.join(details_parts)}. Without this filter the "
+                "engine must scan every partition."
+            )
+        else:
+            affected_tables = list(query_tables)
+            action = (
+                "Add a WHERE filter on the table's partition column so the "
+                "engine can skip irrelevant partitions. Check the table schema "
+                "to identify which column(s) the table is partitioned by."
+            )
+
+    # ------------------------------------------------------------------
+    # Cartesian product / nested loop join
+    # ------------------------------------------------------------------
+    elif "Cartesian product" in warning or "nested loop" in warning.lower():
+        affected_tables = list(query_tables)
+        action = (
+            "Add an explicit JOIN condition (ON clause) to avoid a full "
+            "cartesian product. If a cross join is truly intended, pre-aggregate "
+            "or filter both sides to reduce input sizes."
+        )
+        snippet = _first_snippet("has_cross_join")
+
+    # ------------------------------------------------------------------
+    # SortMergeJoin that could be BroadcastHashJoin
+    # ------------------------------------------------------------------
+    elif "SortMergeJoin" in warning:
+        action = (
+            "If one side of the join is small (< 500 MB after filters), add a "
+            "broadcast hint to avoid the expensive sort-merge:\n"
+            "SELECT /*+ BROADCAST(small_table) */ ..."
+        )
+
+    # ------------------------------------------------------------------
+    # High number of exchange / shuffle operations
+    # ------------------------------------------------------------------
+    elif "exchange operations" in warning.lower():
+        action = (
+            "Reduce shuffles by clustering tables on join keys, using broadcast "
+            "hints for small tables, or restructuring the query to minimize the "
+            "number of joins and aggregations that require data redistribution."
+        )
+
+    # ------------------------------------------------------------------
+    # High number of sort operations
+    # ------------------------------------------------------------------
+    elif "sort operations" in warning.lower():
+        action = (
+            "Remove unnecessary ORDER BY clauses in subqueries or CTEs — only "
+            "the outermost ORDER BY affects the final result. Cluster tables on "
+            "columns used in window PARTITION BY to reduce sort overhead."
+        )
+
+    # ------------------------------------------------------------------
+    # Data skew
+    # ------------------------------------------------------------------
+    elif "Data skew" in warning:
+        action = (
+            "Investigate join key value distribution — a few values may hold "
+            "most of the data, creating hot partitions. Consider salting the "
+            "skewed key, pre-aggregating the skewed dimension, or adding a "
+            "SKEW hint:\n"
+            "SELECT /*+ SKEW('table_name') */ ..."
+        )
+
+    # ------------------------------------------------------------------
+    # Large fact-to-fact join
+    # ------------------------------------------------------------------
+    elif "fact-to-fact join" in warning.lower():
+        action = (
+            "Avoid directly joining two large fact tables. Pre-aggregate one "
+            "side to reduce its size, join through a shared dimension table, or "
+            "apply more selective filters before the join."
+        )
+
+    # ------------------------------------------------------------------
+    # Broadcast join with oversized table
+    # ------------------------------------------------------------------
+    elif "Broadcast join with large table" in warning:
+        action = (
+            "Remove the broadcast hint and let the optimizer choose a "
+            "shuffle-based join strategy. Broadcasting tables over ~500 MB "
+            "risks out-of-memory errors on executor nodes."
+        )
+
+    return Recommendation(
+        severity=Severity.WARNING,
+        category=Category.EXECUTION,
+        title="Execution plan warning",
+        description=warning,
+        action=action,
+        snippet=snippet,
+        impact=_plan_warning_impact(warning),
+        affected_tables=affected_tables,
+        per_table_actions=per_table_actions,
+    )
+
+
 def run_analysis(
     statement_id: str,
     on_progress: ProgressCallback | None = None,
@@ -110,13 +278,7 @@ def run_analysis(
     plan_summary = _try_explain(metrics.statement_text)
     if plan_summary:
         plan_recs = [
-            Recommendation(
-                severity=Severity.WARNING,
-                category=Category.EXECUTION,
-                title="Execution plan warning",
-                description=w,
-                impact=_plan_warning_impact(w),
-            )
+            _plan_warning_to_recommendation(w, parsed, tables)
             for w in plan_summary.warnings
         ]
         plan_summary = plan_summary.model_copy(update={"recommendations": plan_recs})

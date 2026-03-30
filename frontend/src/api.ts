@@ -93,19 +93,79 @@ export function rewriteQuery(statementId: string, customInstruction?: string): P
   });
 }
 
-export function benchmarkQueries(
+export interface BenchmarkProgress {
+  phase: "original" | "suggested";
+  state: string;
+  statement_id?: string;
+  elapsed_ms?: number;
+}
+
+export interface BenchmarkPollCallbacks {
+  onProgress: (progress: Record<string, BenchmarkProgress>) => void;
+  onResult: (result: BenchmarkResult) => void;
+  onError: (message: string) => void;
+  onStarted?: (benchmarkId: string) => void;
+}
+
+const POLL_INTERVAL_MS = 2000;
+
+export async function benchmarkQueriesPoll(
   originalSql: string,
   suggestedSql: string,
-  warehouseId?: string,
-): Promise<BenchmarkResult> {
-  return request<BenchmarkResult>(`${BASE}/benchmark`, {
+  warehouseId: string | undefined,
+  callbacks: BenchmarkPollCallbacks,
+): Promise<void> {
+  let benchmarkId: string;
+  try {
+    const startRes = await request<{ benchmark_id: string }>(`${BASE}/benchmark/start`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        original_sql: originalSql,
+        suggested_sql: suggestedSql,
+        warehouse_id: warehouseId ?? null,
+      }),
+    });
+    benchmarkId = startRes.benchmark_id;
+    callbacks.onStarted?.(benchmarkId);
+  } catch (err) {
+    callbacks.onError(err instanceof Error ? err.message : "Failed to start benchmark");
+    return;
+  }
+
+  while (true) {
+    await new Promise((r) => setTimeout(r, POLL_INTERVAL_MS));
+
+    let poll: { status: string; progress: Record<string, BenchmarkProgress>; result: BenchmarkResult | null; error: string | null };
+    try {
+      poll = await request(`${BASE}/benchmark/${encodeURIComponent(benchmarkId)}/status`);
+    } catch (err) {
+      callbacks.onError(err instanceof Error ? err.message : "Failed to poll benchmark status");
+      return;
+    }
+
+    if (poll.progress && Object.keys(poll.progress).length > 0) {
+      callbacks.onProgress(poll.progress);
+    }
+
+    if (poll.status === "done" && poll.result) {
+      callbacks.onResult(poll.result);
+      return;
+    }
+
+    if (poll.status === "error") {
+      callbacks.onError(poll.error || "Benchmark failed");
+      return;
+    }
+  }
+}
+
+export function cancelBenchmarkQuery(
+  benchmarkId: string,
+  phase: "original" | "suggested",
+): Promise<void> {
+  return request(`${BASE}/benchmark/${encodeURIComponent(benchmarkId)}/cancel/${phase}`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({
-      original_sql: originalSql,
-      suggested_sql: suggestedSql,
-      warehouse_id: warehouseId ?? null,
-    }),
   });
 }
 

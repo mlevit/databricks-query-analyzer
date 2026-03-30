@@ -49,6 +49,9 @@ export interface TableInfo {
   size_in_bytes: number | null;
   column_count: number | null;
   properties: Record<string, string>;
+  has_cbo_stats: boolean;
+  stats_num_rows: number | null;
+  stats_total_size: number | null;
   recommendations: Recommendation[];
 }
 

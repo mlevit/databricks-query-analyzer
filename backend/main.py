@@ -5,6 +5,7 @@ import queue
 import re
 import threading
 import time
+import uuid
 from collections import OrderedDict
 
 from fastapi import FastAPI, HTTPException
@@ -14,7 +15,7 @@ from pydantic import BaseModel
 
 from backend.analyzer import STEPS, run_analysis
 from backend.analyzers.ai_advisor import rewrite_query
-from backend.db import execute_sql_with_metrics
+from backend.db import cancel_statement, execute_sql_with_metrics
 from backend.models import AIRewriteResult, AnalysisResult, BenchmarkResult, QueryBenchmarkStats, QueryExecutionMetrics
 
 logging.basicConfig(
@@ -160,22 +161,44 @@ class BenchmarkRequest(BaseModel):
     warehouse_id: str | None = None
 
 
-@app.post("/api/benchmark", response_model=BenchmarkResult)
-async def benchmark(req: BenchmarkRequest):
-    """Run both the original and suggested queries and return execution stats."""
+# ---------------------------------------------------------------------------
+# Async benchmark via submit + poll (gateway-timeout-safe)
+# ---------------------------------------------------------------------------
+_BENCHMARK_JOBS_MAX = 50
+_BENCHMARK_JOB_TTL = 30 * 60  # 30 minutes
+
+_benchmark_jobs: OrderedDict[str, dict] = OrderedDict()
+_benchmark_jobs_lock = threading.Lock()
+
+
+def _prune_benchmark_jobs() -> None:
+    """Remove expired or excess jobs. Caller must hold the lock."""
+    now = time.time()
+    expired = [k for k, v in _benchmark_jobs.items() if now - v["created_at"] > _BENCHMARK_JOB_TTL]
+    for k in expired:
+        _benchmark_jobs.pop(k, None)
+    while len(_benchmark_jobs) > _BENCHMARK_JOBS_MAX:
+        _benchmark_jobs.popitem(last=False)
+
+
+@app.post("/api/benchmark/start")
+async def benchmark_start(req: BenchmarkRequest):
+    """Submit a benchmark job that runs in the background. Returns a job ID for polling."""
     wid = req.warehouse_id or None
+    job_id = uuid.uuid4().hex
 
-    try:
-        original_stats = execute_sql_with_metrics(req.original_sql, warehouse_id=wid)
-    except Exception:
-        logger.exception("Benchmark: original query execution failed")
-        raise HTTPException(status_code=500, detail="Failed to execute original query") from None
+    job: dict = {
+        "created_at": time.time(),
+        "status": "running",
+        "progress": {},
+        "statement_ids": {},
+        "result": None,
+        "error": None,
+    }
 
-    try:
-        suggested_stats = execute_sql_with_metrics(req.suggested_sql, warehouse_id=wid)
-    except Exception:
-        logger.exception("Benchmark: suggested query execution failed")
-        raise HTTPException(status_code=500, detail="Failed to execute suggested query") from None
+    with _benchmark_jobs_lock:
+        _prune_benchmark_jobs()
+        _benchmark_jobs[job_id] = job
 
     def _to_benchmark_stats(raw: dict) -> QueryBenchmarkStats:
         metrics_data = raw.pop("metrics", None)
@@ -184,10 +207,92 @@ async def benchmark(req: BenchmarkRequest):
             stats.metrics = QueryExecutionMetrics(**metrics_data)
         return stats
 
-    return BenchmarkResult(
-        original=_to_benchmark_stats(original_stats),
-        suggested=_to_benchmark_stats(suggested_stats),
-    )
+    def _poll_cb(phase: str):
+        def cb(info: dict):
+            job["progress"][phase] = {"phase": phase, **info}
+            if "statement_id" in info and info["statement_id"]:
+                job["statement_ids"][phase] = info["statement_id"]
+        return cb
+
+    results: dict[str, dict | None] = {"original": None, "suggested": None}
+    errors: dict[str, str] = {}
+
+    def run_one(phase: str, sql: str) -> None:
+        try:
+            job["progress"][phase] = {"phase": phase, "state": "STARTING", "elapsed_ms": 0}
+            raw = execute_sql_with_metrics(sql, warehouse_id=wid, on_poll=_poll_cb(phase))
+            job["progress"][phase] = {
+                "phase": phase, "state": "DONE",
+                "statement_id": raw.get("statement_id"), "elapsed_ms": raw["elapsed_ms"],
+            }
+            results[phase] = raw
+        except Exception as exc:
+            logger.exception("Benchmark %s query failed", phase)
+            errors[phase] = str(exc)
+
+    def run() -> None:
+        try:
+            t_original = threading.Thread(target=run_one, args=("original", req.original_sql))
+            t_suggested = threading.Thread(target=run_one, args=("suggested", req.suggested_sql))
+            t_original.start()
+            t_suggested.start()
+            t_original.join()
+            t_suggested.join()
+
+            if errors:
+                parts = [f"{phase}: {msg}" for phase, msg in errors.items()]
+                job["status"] = "error"
+                job["error"] = "; ".join(parts)
+            else:
+                result = BenchmarkResult(
+                    original=_to_benchmark_stats(results["original"]),
+                    suggested=_to_benchmark_stats(results["suggested"]),
+                )
+                job["result"] = result.model_dump(mode="json")
+                job["status"] = "done"
+        except Exception as exc:
+            logger.exception("Benchmark job failed")
+            job["status"] = "error"
+            job["error"] = str(exc)
+
+    threading.Thread(target=run, daemon=True).start()
+
+    return {"benchmark_id": job_id}
+
+
+@app.get("/api/benchmark/{benchmark_id}/status")
+async def benchmark_status(benchmark_id: str):
+    """Poll for benchmark job progress and results."""
+    with _benchmark_jobs_lock:
+        job = _benchmark_jobs.get(benchmark_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Benchmark job not found or expired")
+
+    return {
+        "status": job["status"],
+        "progress": job["progress"],
+        "result": job["result"],
+        "error": job["error"],
+    }
+
+
+@app.post("/api/benchmark/{benchmark_id}/cancel/{phase}")
+async def benchmark_cancel(benchmark_id: str, phase: str):
+    """Cancel a running benchmark query (original or suggested)."""
+    if phase not in ("original", "suggested"):
+        raise HTTPException(status_code=400, detail="Phase must be 'original' or 'suggested'")
+
+    with _benchmark_jobs_lock:
+        job = _benchmark_jobs.get(benchmark_id)
+    if job is None:
+        raise HTTPException(status_code=404, detail="Benchmark job not found or expired")
+
+    stmt_id = job["statement_ids"].get(phase)
+    if not stmt_id:
+        raise HTTPException(status_code=400, detail=f"No statement ID found for {phase} query")
+
+    cancel_statement(stmt_id)
+    return {"cancelled": True, "phase": phase, "statement_id": stmt_id}
 
 
 @app.get("/api/health")

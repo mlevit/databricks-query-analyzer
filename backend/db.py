@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any
+from typing import Any, Callable
 
 from databricks.sdk import WorkspaceClient
 from databricks.sdk.service import sql as sql_service
@@ -29,6 +29,16 @@ def get_warehouse_id() -> str:
             "Configure it in app.yaml or your environment."
         )
     return wid
+
+
+def cancel_statement(statement_id: str) -> None:
+    """Cancel a running Databricks SQL statement."""
+    w = get_client()
+    try:
+        w.statement_execution.cancel_execution(statement_id)
+        logger.info("Cancelled statement %s", statement_id)
+    except Exception:
+        logger.warning("Failed to cancel statement %s", statement_id, exc_info=True)
 
 
 def execute_sql(
@@ -59,12 +69,19 @@ def execute_sql(
 
 
 def execute_sql_with_metrics(
-    statement: str, *, warehouse_id: str | None = None
+    statement: str,
+    *,
+    warehouse_id: str | None = None,
+    on_poll: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Execute a SQL statement and return wall-clock time plus manifest stats.
 
     Returns a dict with keys: elapsed_ms, row_count, byte_count, status,
     statement_id, and error (if failed).
+
+    *on_poll* is an optional callback invoked during the polling loop and
+    metric-fetch phase so callers (e.g. SSE endpoints) can relay progress.
+    It receives a dict with ``statement_id``, ``state``, and ``elapsed_ms``.
     """
     import time as _time
 
@@ -88,6 +105,12 @@ def execute_sql_with_metrics(
 
     stmt_id = getattr(response, "statement_id", None)
 
+    def _elapsed() -> int:
+        return round((_time.perf_counter() - t0) * 1000)
+
+    if on_poll and stmt_id:
+        on_poll({"statement_id": stmt_id, "state": "SUBMITTED", "elapsed_ms": _elapsed()})
+
     if stmt_id:
         while True:
             poll = w.statement_execution.get_statement(stmt_id)
@@ -100,9 +123,15 @@ def execute_sql_with_metrics(
             ):
                 response = poll
                 break
+            if on_poll:
+                on_poll({
+                    "statement_id": stmt_id,
+                    "state": state.value if state else "PENDING",
+                    "elapsed_ms": _elapsed(),
+                })
             _time.sleep(1)
 
-    elapsed_ms = round((_time.perf_counter() - t0) * 1000)
+    elapsed_ms = _elapsed()
 
     result: dict[str, Any] = {
         "elapsed_ms": elapsed_ms,
@@ -125,6 +154,8 @@ def execute_sql_with_metrics(
         result["byte_count"] = response.manifest.total_byte_count
 
     if stmt_id:
+        if on_poll:
+            on_poll({"statement_id": stmt_id, "state": "FETCHING_METRICS", "elapsed_ms": _elapsed()})
         metrics = _fetch_benchmark_metrics(stmt_id)
         if metrics:
             result["metrics"] = metrics

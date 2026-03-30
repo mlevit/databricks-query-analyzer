@@ -81,6 +81,9 @@ class TableInfo(BaseModel):
     column_count: Optional[int] = None
     columns: list[ColumnInfo] = Field(default_factory=list)
     properties: dict[str, str] = Field(default_factory=dict)
+    has_cbo_stats: bool = False
+    stats_num_rows: Optional[int] = None
+    stats_total_size: Optional[int] = None
     recommendations: list[Recommendation] = Field(default_factory=list)
 
 

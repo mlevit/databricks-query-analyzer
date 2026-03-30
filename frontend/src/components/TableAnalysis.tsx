@@ -1,6 +1,6 @@
 import { useState } from "react";
 import type { TableInfo } from "../types";
-import { humanBytes } from "../utils";
+import { humanBytes, formatNumber } from "../utils";
 import { RecommendationCard } from "./shared/recommendation";
 
 interface Props {
@@ -85,6 +85,18 @@ function TableCard({ table }: { table: TableInfo }) {
             {table.partition_columns.length > 0
               ? table.partition_columns.join(", ")
               : "None"}
+          </div>
+          <div className="text-[0.8rem]">
+            <strong>CBO Statistics:</strong>{" "}
+            {table.has_cbo_stats ? (
+              <span className="text-green-600">
+                {table.stats_num_rows != null && <>{formatNumber(table.stats_num_rows)} rows</>}
+                {table.stats_num_rows != null && table.stats_total_size != null && " · "}
+                {table.stats_total_size != null && <>{humanBytes(table.stats_total_size)}</>}
+              </span>
+            ) : (
+              <span className="text-amber-500">Not collected</span>
+            )}
           </div>
 
           {table.recommendations.length > 0 && (
