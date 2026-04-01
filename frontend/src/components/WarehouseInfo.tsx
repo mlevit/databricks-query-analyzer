@@ -292,8 +292,10 @@ function ActivityCard({ activity }: { activity: WarehouseActivity }) {
 
 export default function WarehouseInfo({ warehouse }: Props) {
   const isServerless = warehouse.enable_serverless_compute === true;
-  const photonValue = warehouse.enable_photon === true ? "Enabled" : warehouse.enable_photon === false ? "Disabled" : "Unknown";
   const autoStopValue = warehouse.auto_stop_mins === 0 ? "Disabled" : warehouse.auto_stop_mins != null ? `${warehouse.auto_stop_mins} min` : "N/A";
+  const channelValue = warehouse.channel
+    ? warehouse.channel.replace(/^CHANNEL_NAME_/i, "").replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase())
+    : "N/A";
 
   const details = [
     { label: "Name", value: warehouse.name || "N/A" },
@@ -303,9 +305,8 @@ export default function WarehouseInfo({ warehouse }: Props) {
     { label: "Max Clusters", value: warehouse.max_num_clusters?.toString() || "N/A" },
     { label: "Running", value: warehouse.num_clusters?.toString() || "N/A" },
     { label: "Auto Stop", value: autoStopValue },
-    { label: "Photon", value: photonValue },
     { label: "Spot Policy", value: warehouse.spot_instance_policy || "N/A" },
-    { label: "Channel", value: warehouse.channel || "N/A" },
+    { label: "Channel", value: channelValue },
   ];
 
   return (

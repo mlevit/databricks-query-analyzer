@@ -84,7 +84,7 @@ function TableCard({ table }: { table: TableInfo }) {
             {table.partition_columns.length > 0 ? table.partition_columns.join(", ") : "None"}
           </div>
           <div className="text-[0.8rem] text-slate-300">
-            <strong className="text-slate-400">CBO Statistics:</strong>{" "}
+            <strong className="text-slate-400">Statistics:</strong>{" "}
             {table.has_cbo_stats ? (
               <span className="text-cyan-400">
                 {table.stats_num_rows != null && <>{formatNumber(table.stats_num_rows)} rows</>}

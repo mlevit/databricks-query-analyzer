@@ -27,6 +27,28 @@ class TestTableExtraction:
         assert "a.b.c" in result.tables
         assert "a.b.d" in result.tables
 
+    def test_backtick_quoted_schema(self):
+        sql = "SELECT * FROM hatakeyama_demo_catalog.`84_cpg_app`.silver_fct_inventory_daily_sku_store"
+        result = parse_query(sql)
+        assert len(result.tables) == 1
+        name = result.tables[0]
+        assert "hatakeyama_demo_catalog" in name
+        assert "84_cpg_app" in name
+        assert "silver_fct_inventory_daily_sku_store" in name
+        assert name == "hatakeyama_demo_catalog.`84_cpg_app`.silver_fct_inventory_daily_sku_store"
+
+    def test_backtick_quoted_all_parts(self):
+        sql = "SELECT * FROM `my-catalog`.`84_schema`.`my-table`"
+        result = parse_query(sql)
+        assert len(result.tables) == 1
+        assert result.tables[0] == "`my-catalog`.`84_schema`.`my-table`"
+
+    def test_backtick_normal_parts_not_quoted(self):
+        sql = "SELECT * FROM `normal_catalog`.`normal_schema`.`normal_table`"
+        result = parse_query(sql)
+        assert len(result.tables) == 1
+        assert result.tables[0] == "normal_catalog.normal_schema.normal_table"
+
     def test_deduplicate_tables(self):
         sql = "SELECT * FROM t WHERE id IN (SELECT id FROM t)"
         result = parse_query(sql)

@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import logging
+import re
 from dataclasses import dataclass, field
 
 import sqlglot
 from sqlglot import exp
 
 logger = logging.getLogger(__name__)
+
+_BARE_IDENT_RE = re.compile(r"^[A-Za-z_]\w*$")
 
 LARGE_IN_LIST_THRESHOLD = 50
 DEEP_NESTING_THRESHOLD = 4
@@ -25,7 +28,7 @@ _SNIPPET_MAX_LENGTH = 200
 def _sql_snippet(node: exp.Expression, max_length: int = _SNIPPET_MAX_LENGTH) -> str:
     """Generate a compact SQL string from an AST node, truncated if needed."""
     try:
-        text = node.sql(dialect="spark")
+        text = node.sql(dialect="databricks")
     except Exception:
         text = str(node)
     text = " ".join(text.split())
@@ -93,10 +96,34 @@ class JoinInfo:
     on_columns: list[str] = field(default_factory=list)
 
 
+def _maybe_quote_ident(ident: exp.Identifier) -> str:
+    """Backtick-quote an identifier if it cannot be used bare in SQL."""
+    name = ident.name
+    if not name:
+        return ""
+    if not _BARE_IDENT_RE.match(name):
+        return f"`{name}`"
+    return name
+
+
+def _table_full_name(table: exp.Table) -> str | None:
+    """Build a fully-qualified table name, adding backtick quoting where needed."""
+    parts: list[str] = []
+    for key in ("catalog", "db", "this"):
+        node = table.args.get(key)
+        if node is None:
+            continue
+        if isinstance(node, exp.Identifier) and node.name:
+            parts.append(_maybe_quote_ident(node))
+        elif hasattr(node, "name") and node.name:
+            parts.append(str(node.name))
+    return ".".join(parts) if parts else None
+
+
 def parse_query(sql: str) -> ParsedQuery:
     result = ParsedQuery()
     try:
-        parsed = sqlglot.parse(sql, error_level=sqlglot.ErrorLevel.IGNORE)
+        parsed = sqlglot.parse(sql, dialect="databricks", error_level=sqlglot.ErrorLevel.IGNORE)
     except Exception:
         logger.warning("sqlglot failed to parse query, returning empty result")
         return result
@@ -163,19 +190,12 @@ def _extract_tables(node: exp.Expression, result: ParsedQuery) -> None:
             virtual_names.add(str(alias).lower())
 
     for table in node.find_all(exp.Table):
-        parts = []
-        if table.catalog:
-            parts.append(table.catalog)
-        if table.db:
-            parts.append(table.db)
-        if table.name:
-            parts.append(table.name)
-        if not parts:
+        full_name = _table_full_name(table)
+        if not full_name:
             continue
 
-        full_name = ".".join(parts)
-
-        if full_name.lower() in virtual_names:
+        bare_name = full_name.replace("`", "").lower()
+        if bare_name in virtual_names:
             continue
 
         result.tables.append(full_name)
@@ -202,14 +222,7 @@ def _extract_joins(node: exp.Expression, result: ParsedQuery) -> None:
         right_table = None
         table_node = join.find(exp.Table)
         if table_node:
-            parts = []
-            if table_node.catalog:
-                parts.append(table_node.catalog)
-            if table_node.db:
-                parts.append(table_node.db)
-            if table_node.name:
-                parts.append(table_node.name)
-            right_table = ".".join(parts) if parts else None
+            right_table = _table_full_name(table_node)
 
         on_cols: list[str] = []
         on_clause = join.args.get("on")
@@ -264,16 +277,9 @@ def _build_table_alias_map(node: exp.Expression) -> dict[str, str]:
     """Map table aliases to their full qualified names."""
     alias_map: dict[str, str] = {}
     for table in node.find_all(exp.Table):
-        parts = []
-        if table.catalog:
-            parts.append(table.catalog)
-        if table.db:
-            parts.append(table.db)
-        if table.name:
-            parts.append(table.name)
-        if not parts:
+        full_name = _table_full_name(table)
+        if not full_name:
             continue
-        full_name = ".".join(parts)
         alias = table.alias
         if alias:
             alias_map[alias.lower()] = full_name

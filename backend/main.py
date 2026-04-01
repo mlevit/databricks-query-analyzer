@@ -1,3 +1,4 @@
+import contextvars
 import json
 import logging
 import os
@@ -8,14 +9,14 @@ import time
 import uuid
 from collections import OrderedDict
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from backend.analyzer import STEPS, run_analysis
 from backend.analyzers.ai_advisor import rewrite_query
-from backend.db import cancel_statement, execute_sql_with_metrics
+from backend.db import cancel_statement, execute_sql_with_metrics, set_user_token
 from backend.models import AIRewriteResult, AnalysisResult, BenchmarkResult, QueryBenchmarkStats, QueryExecutionMetrics
 
 logging.basicConfig(
@@ -25,6 +26,21 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 app = FastAPI(title="Databricks SQL Architect")
+
+
+@app.middleware("http")
+async def user_auth_middleware(request: Request, call_next):
+    """Extract the Databricks Apps user token and make it available to all
+    downstream SDK calls via a ContextVar so queries run on behalf of the
+    logged-in user."""
+    token = request.headers.get("x-forwarded-access-token")
+    set_user_token(token)
+    try:
+        response = await call_next(request)
+    finally:
+        set_user_token(None)
+    return response
+
 
 # ---------------------------------------------------------------------------
 # Bounded TTL cache for analysis results
@@ -93,7 +109,8 @@ async def analyze_stream(statement_id: str):
         finally:
             q.put(None)
 
-    thread = threading.Thread(target=run, daemon=True)
+    ctx = contextvars.copy_context()
+    thread = threading.Thread(target=ctx.run, args=(run,), daemon=True)
     thread.start()
 
     def event_generator():
@@ -233,8 +250,14 @@ async def benchmark_start(req: BenchmarkRequest):
 
     def run() -> None:
         try:
-            t_original = threading.Thread(target=run_one, args=("original", req.original_sql))
-            t_suggested = threading.Thread(target=run_one, args=("suggested", req.suggested_sql))
+            ctx_orig = contextvars.copy_context()
+            ctx_sugg = contextvars.copy_context()
+            t_original = threading.Thread(
+                target=ctx_orig.run, args=(run_one, "original", req.original_sql),
+            )
+            t_suggested = threading.Thread(
+                target=ctx_sugg.run, args=(run_one, "suggested", req.suggested_sql),
+            )
             t_original.start()
             t_suggested.start()
             t_original.join()
@@ -256,7 +279,8 @@ async def benchmark_start(req: BenchmarkRequest):
             job["status"] = "error"
             job["error"] = str(exc)
 
-    threading.Thread(target=run, daemon=True).start()
+    ctx = contextvars.copy_context()
+    threading.Thread(target=ctx.run, args=(run,), daemon=True).start()
 
     return {"benchmark_id": job_id}
 

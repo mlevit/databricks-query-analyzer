@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import os
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -13,12 +14,30 @@ logger = logging.getLogger(__name__)
 
 _client: WorkspaceClient | None = None
 
+_user_token_var: ContextVar[str | None] = ContextVar("user_token", default=None)
 
-def get_client() -> WorkspaceClient:
+
+def set_user_token(token: str | None) -> None:
+    """Store the current user's access token for on-behalf-of-user auth."""
+    _user_token_var.set(token)
+
+
+def _get_app_client() -> WorkspaceClient:
+    """Return the singleton app-identity (service principal) WorkspaceClient."""
     global _client
     if _client is None:
         _client = WorkspaceClient()
     return _client
+
+
+def get_client() -> WorkspaceClient:
+    """Return a WorkspaceClient scoped to the current user when a token is
+    available, otherwise fall back to the app service principal."""
+    token = _user_token_var.get()
+    if token:
+        host = _get_app_client().config.host
+        return WorkspaceClient(host=host, token=token, auth_type="pat")
+    return _get_app_client()
 
 
 def get_warehouse_id() -> str:

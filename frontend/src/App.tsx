@@ -7,6 +7,7 @@ import QueryInput from "./components/QueryInput";
 import PerformanceTab from "./components/PerformanceTab";
 import SystemTab from "./components/SystemTab";
 import OptimizationTab from "./components/OptimizationTab";
+import ExportMenu from "./components/ExportMenu";
 import type { AnalysisResult } from "./types";
 
 const TABS = ["Performance", "System", "Optimization"] as const;
@@ -110,6 +111,7 @@ export default function App() {
           initialValue={statementId}
           variant="compact"
         />
+        {result && <ExportMenu result={result} />}
       </header>
 
       {error && (
