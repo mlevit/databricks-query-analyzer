@@ -61,6 +61,16 @@ _SAFE_TABLE_NAME_RE = re.compile(r"^(`[\w]+`|\w[\w]*)(\.(`[\w]+`|\w[\w]*))*$")
 
 _SDK_MESSAGE_RE = re.compile(r'message="([^"]+)"')
 
+_SUPPRESSED_ERROR_PATTERNS = (
+    "EXPECT_TABLE_NOT_VIEW",
+)
+
+
+def _is_suppressed_error(exc: Exception) -> bool:
+    """Return True if the error is benign and should not be surfaced to the user."""
+    text = str(exc)
+    return any(pat in text for pat in _SUPPRESSED_ERROR_PATTERNS)
+
 
 def _extract_error_message(exc: Exception) -> str:
     """Extract a human-readable message from SDK exceptions."""
@@ -106,6 +116,8 @@ def fetch_table_detail(
             return rows[0], None
     except Exception as exc:
         logger.warning("Failed to DESCRIBE DETAIL %s: %s", table_name, exc)
+        if _is_suppressed_error(exc):
+            return None, None
         msg = _extract_error_message(exc)
         return None, f"Could not fetch details for `{table_name}`: {msg}"
     return None, None
@@ -138,6 +150,8 @@ def fetch_table_columns(
         return columns, None
     except Exception as exc:
         logger.warning("Failed to DESCRIBE TABLE %s: %s", table_name, exc)
+        if _is_suppressed_error(exc):
+            return [], None
         msg = _extract_error_message(exc)
         return [], f"Could not fetch columns for `{table_name}`: {msg}"
 
@@ -174,6 +188,8 @@ def fetch_table_cbo_stats(
         }, None
     except Exception as exc:
         logger.warning("Failed to fetch catalog properties for %s: %s", table_name, exc)
+        if _is_suppressed_error(exc):
+            return empty, None
         msg = _extract_error_message(exc)
         return empty, f"Could not fetch catalog properties for `{table_name}`: {msg}"
 
