@@ -155,13 +155,17 @@ class TestInappropriateDataTypes:
         cols = [_col("event_date", "STRING"), _col("id", "BIGINT")]
         recs: list[Recommendation] = []
         _check_inappropriate_data_types("db.schema.events", cols, recs)
-        assert any("Date columns stored as STRING" in r.title for r in recs)
+        rec = next(r for r in recs if "Date columns stored as STRING" in r.title)
+        assert "`event_date`" in rec.description
+        assert "ALTER TABLE db.schema.events ALTER COLUMN `event_date`" in rec.per_table_actions["db.schema.events"]
 
     def test_numeric_as_string(self):
         cols = [_col("total_amount", "STRING"), _col("id", "BIGINT")]
         recs: list[Recommendation] = []
         _check_inappropriate_data_types("db.schema.orders", cols, recs)
-        assert any("Numeric columns stored as STRING" in r.title for r in recs)
+        rec = next(r for r in recs if "Numeric columns stored as STRING" in r.title)
+        assert "`total_amount`" in rec.description
+        assert "ALTER TABLE db.schema.orders ALTER COLUMN `total_amount`" in rec.per_table_actions["db.schema.orders"]
 
     def test_proper_types_ok(self):
         cols = [_col("event_date", "DATE"), _col("amount", "DECIMAL")]

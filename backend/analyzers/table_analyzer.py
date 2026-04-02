@@ -34,8 +34,8 @@ _DATE_COLUMN_PATTERNS = re.compile(
 )
 
 _NUMERIC_COLUMN_PATTERNS = re.compile(
-    r"(amount|price|cost|revenue|quantity|qty|total|balance|rate|fee|tax|salary|"
-    r"budget|discount|weight|height|width|length|score|count|num_)",
+    r"(?:^|_)(amount|price|cost|revenue|quantity|qty|total|balance|rate|fee|tax|salary"
+    r"|budget|discount|weight|height|width|length|score|count|num)(?:$|_)",
     re.IGNORECASE,
 )
 
@@ -904,44 +904,50 @@ def _check_inappropriate_data_types(
             bad_numbers.append(col.name)
 
     if bad_dates:
+        cols_list = ", ".join(f"`{c}`" for c in bad_dates)
+        action_lines = "\n".join(
+            f"ALTER TABLE {table_name} ALTER COLUMN `{c}` SET DATA TYPE TIMESTAMP;"
+            for c in bad_dates
+        )
         recs.append(
             Recommendation(
                 severity=Severity.WARNING,
                 category=Category.DATA_MODELING,
                 title="Date columns stored as STRING",
                 description=(
-                    "Columns that appear to hold date/time values are typed as STRING. "
+                    f"The following STRING columns appear to hold date/time values: "
+                    f"{cols_list}. "
                     "This prevents partition pruning, data skipping via zone maps, "
                     "and proper sort ordering. Compression is also significantly worse."
                 ),
                 affected_tables=[table_name],
                 per_table_actions={
-                    table_name: (
-                        f"ALTER TABLE {table_name} ALTER COLUMN <col> SET DATA TYPE "
-                        "TIMESTAMP or DATE as appropriate."
-                    ),
+                    table_name: action_lines,
                 },
                 impact=3,
             )
         )
 
     if bad_numbers:
+        cols_list = ", ".join(f"`{c}`" for c in bad_numbers)
+        action_lines = "\n".join(
+            f"ALTER TABLE {table_name} ALTER COLUMN `{c}` SET DATA TYPE BIGINT;"
+            for c in bad_numbers
+        )
         recs.append(
             Recommendation(
                 severity=Severity.WARNING,
                 category=Category.DATA_MODELING,
                 title="Numeric columns stored as STRING",
                 description=(
-                    "Columns that appear to hold numeric values are typed as STRING. "
+                    f"The following STRING columns appear to hold numeric values: "
+                    f"{cols_list}. "
                     "This prevents proper aggregation pushdown, zone-map-based "
                     "data skipping, and wastes storage due to poor compression."
                 ),
                 affected_tables=[table_name],
                 per_table_actions={
-                    table_name: (
-                        f"ALTER TABLE {table_name} ALTER COLUMN <col> SET DATA TYPE "
-                        "DECIMAL, DOUBLE, or BIGINT as appropriate."
-                    ),
+                    table_name: action_lines,
                 },
                 impact=3,
             )
